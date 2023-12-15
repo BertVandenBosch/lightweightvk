@@ -3086,7 +3086,7 @@ lvk::VulkanContext::VulkanContext(const lvk::ContextConfig& config, void* window
   glslang_initialize_process();
 
 #ifdef LVK_WITH_OPENXR
-  createInstance(config.xrParams);
+  createInstance(reinterpret_cast<XRParams*>(config.xrParams));
 #else
   createInstance();
 #endif
@@ -4196,7 +4196,7 @@ PFN_xrVoidFunction lvk::VulkanContext::getXRFunction(XrInstance instance, const 
 
 void lvk::VulkanContext::createInstance(
 #ifdef LVK_WITH_OPENXR
-    const XRParams& xrParams
+    const XRParams* xrParams
 #endif
 ) {
   vkInstance_ = VK_NULL_HANDLE;
@@ -4280,10 +4280,10 @@ void lvk::VulkanContext::createInstance(
                                                       .vulkanCreateInfo = &ci,
                                                       .vulkanAllocator = nullptr};
 
-  auto xrCreateVulkanInstanceKHR = (PFN_xrCreateVulkanInstanceKHR)getXRFunction(xrParams.instance, "xrCreateVulkanInstanceKHR");
+  auto xrCreateVulkanInstanceKHR = (PFN_xrCreateVulkanInstanceKHR)getXRFunction(xrParams->instance, "xrCreateVulkanInstanceKHR");
 
   VkResult xrInstanceVkResult;
-  XrResult xrInstanceRes = xrCreateVulkanInstanceKHR(xrParams.instance, &xrInstanceCi, &vkInstance_, &xrInstanceVkResult);
+  XrResult xrInstanceRes = xrCreateVulkanInstanceKHR(xrParams->instance, &xrInstanceCi, &vkInstance_, &xrInstanceVkResult);
 #else
   VK_ASSERT(vkCreateInstance(&ci, nullptr, &vkInstance_));
 

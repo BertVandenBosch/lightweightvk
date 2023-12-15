@@ -368,7 +368,11 @@ std::unique_ptr<lvk::IContext> lvk::createVulkanContextWithSwapchain(GLFWwindow*
     return nullptr;
   }
 
+#ifndef LVK_WITH_OPENXR
   Result res = ctx->initContext(device);
+#else
+  Result res = ctx->initContext(device, cfg.xrParams->instance);
+#endif
 
   if (!res.isOk()) {
     LVK_ASSERT_MSG(false, "Failed initContext()");

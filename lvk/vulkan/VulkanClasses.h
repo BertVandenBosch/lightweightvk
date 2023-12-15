@@ -514,7 +514,7 @@ class VulkanContext final : public IContext {
 
 #ifdef LVK_WITH_OPENXR
   static PFN_xrVoidFunction getXRFunction(XrInstance instance, const char* name);
-  void createInstance(const XRParams& xrParams);
+  void createInstance(const XRParams* xrParams);
 #endif
 
   ICommandBuffer& acquireCommandBuffer() override;

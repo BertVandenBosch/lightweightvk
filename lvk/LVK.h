@@ -897,6 +897,10 @@ namespace lvk {
 
 using ShaderModuleErrorCallback = void (*)(lvk::IContext*, lvk::ShaderModuleHandle, int line, int col, const char* debugName);
 
+#ifdef LVK_WITH_OPENXR
+struct XRParams;
+#endif
+
 struct ContextConfig {
   bool terminateOnValidationError = false; // invoke std::terminate() on any validation error
   bool enableValidation = true;
@@ -907,7 +911,7 @@ struct ContextConfig {
   ShaderModuleErrorCallback shaderModuleErrorCallback = nullptr;
 
 #ifdef LVK_WITH_OPENXR
-  XRParams xrParams = {};
+  XRParams* xrParams;
 #endif
 };
 
