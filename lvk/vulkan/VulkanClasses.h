@@ -27,7 +27,7 @@ class VulkanContext;
 #ifdef LVK_WITH_OPENXR
 struct XRParams {
   XrInstance instance = {XR_NULL_HANDLE};
-  // XrSystemId systemId = {XR_NULL_SYSTEM_ID};
+  XrSystemId systemId = {XR_NULL_SYSTEM_ID};
 };
 #endif
 

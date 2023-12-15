@@ -4276,6 +4276,7 @@ void lvk::VulkanContext::createInstance(
 
 #ifdef LVK_WITH_OPENXR
   const XrVulkanInstanceCreateInfoKHR xrInstanceCi = {.type = XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR,
+                                                      .systemId = xrParams->systemId,
                                                       .pfnGetInstanceProcAddr = vkGetInstanceProcAddr,
                                                       .vulkanCreateInfo = &ci,
                                                       .vulkanAllocator = nullptr};

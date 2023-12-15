@@ -155,6 +155,12 @@ if(LVK_WITH_IMPLOT)
   target_compile_definitions(LVKLibrary PUBLIC "LVK_WITH_IMPLOT=1")
 endif()
 
+if(LVK_WITH_OPENXR)
+  target_compile_definitions(LVKLibrary PUBLIC "LVK_WITH_OPENXR=1")
+  target_compile_definitions(LVKLibrary PUBLIC "XR_USE_GRAPHICS_API_VULKAN=1")
+endif()
+
+
 if(LVK_DEPLOY_DEPS)
   add_dependencies(LVKLibrary LVKDependencies)
 endif()
