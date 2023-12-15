@@ -56,6 +56,12 @@ endif()
 target_include_directories(LVKVulkan PUBLIC "${LVK_ROOT_DIR}/third-party/deps/src/volk")
 target_include_directories(LVKVulkan PUBLIC "${LVK_ROOT_DIR}/third-party/deps/src/vma/include")
 
+if(LVK_WITH_OPENXR)
+  add_definitions("-DLVK_WITH_OPENXR")
+  target_link_libraries(LVKVulkan PUBLIC OpenXR::openxr_loader)
+  target_include_directories(LVKVulkan PUBLIC "${LVK_ROOT_DIR}/third-party/deps/src/openxr-sdk/include")
+endif()
+
 if(WIN32)
   add_definitions("-DVK_USE_PLATFORM_WIN32_KHR=1")
   add_definitions("-DNOMINMAX")

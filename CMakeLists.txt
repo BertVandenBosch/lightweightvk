@@ -19,6 +19,7 @@ option(LVK_WITH_SAMPLES         "Enable sample demo apps"       ON)
 option(LVK_WITH_TRACY           "Enable Tracy profiler"         ON)
 option(LVK_WITH_WAYLAND         "Enable Wayland"                OFF)
 option(LVK_WITH_IMPLOT          "Enable ImPlot"                 ON)
+option(LVK_WITH_OPENXR          "Enable OpenXR"                 ON)
 
 cmake_dependent_option(LVK_WITH_VULKAN_PORTABILITY "Enable portability extension" ON "APPLE" OFF)
 # cmake-format: on
@@ -76,6 +77,7 @@ message(STATUS "LVK_WITH_TRACY              = ${LVK_WITH_TRACY}")
 message(STATUS "LVK_WITH_VULKAN_PORTABILITY = ${LVK_WITH_VULKAN_PORTABILITY}")
 message(STATUS "LVK_WITH_WAYLAND            = ${LVK_WITH_WAYLAND}")
 message(STATUS "LVK_WITH_IMPLOT             = ${LVK_WITH_IMPLOT}")
+message(STATUS "LVK_WITH_OPENXR             = ${LVK_WITH_OPENXR}")
 # cmake-format: on
 
 if(NOT DEFINED CMAKE_BUILD_TYPE)
@@ -121,6 +123,12 @@ if(LVK_WITH_TRACY)
   add_subdirectory(third-party/deps/src/tracy)
   lvk_set_folder(TracyClient "third-party")
 endif()
+
+if(LVK_WITH_OPENXR)
+  add_definitions("-DXR_USE_GRAPHICS_API_VULKAN")
+  add_subdirectory(third-party/deps/src/openxr-sdk)
+endif()
+
 
 # temporary
 if(NOT LVK_USE_CUSTOM_MOLTENVK)
@@ -183,7 +191,7 @@ if(LVK_WITH_GLFW)
   lvk_set_folder(update_mappings "third-party/GLFW3")
   # cmake-format: on
 endif()
-  
+
 if(LVK_WITH_SAMPLES)
   include_directories("third-party/deps/src")
   include_directories("third-party/deps/src/bc7enc")

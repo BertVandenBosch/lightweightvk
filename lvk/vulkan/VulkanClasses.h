@@ -10,6 +10,11 @@
 #include <lvk/vulkan/VulkanUtils.h>
 #include <lvk/Pool.h>
 
+#ifdef LVK_WITH_OPENXR
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
+#endif
+
 #include <deque>
 #include <future>
 #include <memory>
@@ -540,7 +545,7 @@ class VulkanContext final : public IContext {
   ColorSpace getSwapChainColorSpace() const override;
   uint32_t getNumSwapchainImages() const override;
   void recreateSwapchain(int newWidth, int newHeight) override;
-  
+
   uint32_t getFramebufferMSAABitMask() const override;
 
   double getTimestampPeriodToMs() const override;

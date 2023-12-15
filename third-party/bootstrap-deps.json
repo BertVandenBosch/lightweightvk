@@ -170,5 +170,13 @@
         "url": "https://raw.githubusercontent.com/LunarG/VulkanSamples/master/cmake/FindWayland.cmake",
         "sha1": "c2f6e9245c257e6eff91a53602844175e12a6ecc"
     }
+},
+{
+    "name": "openxr-sdk",
+    "source": {
+        "type": "git",
+        "url": "https://github.com/KhronosGroup/OpenXR-SDK.git",
+        "sha1": "401db2742417b942e594e2717a39979ecdf1af8f"
+    }
 }
 ]
