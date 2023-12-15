@@ -24,6 +24,13 @@ namespace lvk {
 
 class VulkanContext;
 
+#ifdef LVK_WITH_OPENXR
+struct XRParams {
+  XrInstance instance = {XR_NULL_HANDLE};
+  // XrSystemId systemId = {XR_NULL_SYSTEM_ID};
+};
+#endif
+
 struct DeviceQueues {
   const static uint32_t INVALID = 0xFFFFFFFF;
   uint32_t graphicsQueueFamilyIndex = INVALID;
@@ -505,6 +512,11 @@ class VulkanContext final : public IContext {
   VulkanContext(const lvk::ContextConfig& config, void* window, void* display = nullptr);
   ~VulkanContext();
 
+#ifdef LVK_WITH_OPENXR
+  static PFN_xrVoidFunction getXRFunction(XrInstance instance, const char* name);
+  void createInstance(const XRParams& xrParams);
+#endif
+
   ICommandBuffer& acquireCommandBuffer() override;
 
   SubmitHandle submit(lvk::ICommandBuffer& commandBuffer, TextureHandle present) override;
@@ -558,7 +570,12 @@ class VulkanContext final : public IContext {
   VkPipeline getVkPipeline(RenderPipelineHandle handle, const RenderPipelineDynamicState& dynamicState);
 
   uint32_t queryDevices(HWDeviceType deviceType, HWDeviceDesc* outDevices, uint32_t maxOutDevices = 1);
-  lvk::Result initContext(const HWDeviceDesc& desc);
+  lvk::Result initContext(const HWDeviceDesc& desc
+#ifdef LVK_WITH_OPENXR
+                          ,
+                          const XrInstance& xrInstance
+#endif
+  );
   lvk::Result initSwapchain(uint32_t width, uint32_t height);
 
   std::shared_ptr<VulkanImage> createImage(VkImageType imageType,
@@ -615,7 +632,9 @@ class VulkanContext final : public IContext {
   void invokeShaderModuleErrorCallback(int line, int col, const char* debugName, VkShaderModule sm);
 
  private:
+#ifndef LVK_WITH_OPENXR
   void createInstance();
+#endif
   void createSurface(void* window, void* display);
   void querySurfaceCapabilities();
   void processDeferredTasks() const;

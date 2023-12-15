@@ -3085,7 +3085,11 @@ lvk::VulkanContext::VulkanContext(const lvk::ContextConfig& config, void* window
 
   glslang_initialize_process();
 
+#ifdef LVK_WITH_OPENXR
+  createInstance(config.xrParams);
+#else
   createInstance();
+#endif
 
   if (window) {
     createSurface(window, display);
@@ -4174,7 +4178,27 @@ bool lvk::VulkanContext::getQueryPoolResults(QueryPoolHandle pool,
   return true;
 }
 
-void lvk::VulkanContext::createInstance() {
+#ifdef LVK_WITH_OPENXR
+PFN_xrVoidFunction lvk::VulkanContext::getXRFunction(XrInstance instance, const char* name) {
+  PFN_xrVoidFunction func;
+
+  XrResult result = xrGetInstanceProcAddr(instance, name, &func);
+
+  if (result != XR_SUCCESS) {
+    // std::cerr << "Failed to load OpenXR extension function '" << name << "': " << result << std::endl;
+    LLOGL("Failed to load OpenXR extension function ' %s ' : &i \n", name, result);
+    return nullptr;
+  }
+
+  return func;
+}
+#endif
+
+void lvk::VulkanContext::createInstance(
+#ifdef LVK_WITH_OPENXR
+    const XRParams& xrParams
+#endif
+) {
   vkInstance_ = VK_NULL_HANDLE;
 
   const char* instanceExtensionNames[] = {
@@ -4204,7 +4228,7 @@ void lvk::VulkanContext::createInstance() {
       VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,
       VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT,
   };
-  
+
 #if defined(__APPLE__)
   // Shader validation doesn't work in MoltenVK for SPIR-V 1.6 under Vulkan 1.3:
   // "Invalid SPIR-V binary version 1.6 for target environment SPIR-V 1.5 (under Vulkan 1.2 semantics)."
@@ -4249,11 +4273,24 @@ void lvk::VulkanContext::createInstance() {
       .enabledExtensionCount = numInstanceExtensions,
       .ppEnabledExtensionNames = instanceExtensionNames,
   };
+
+#ifdef LVK_WITH_OPENXR
+  const XrVulkanInstanceCreateInfoKHR xrInstanceCi = {.type = XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR,
+                                                      .pfnGetInstanceProcAddr = vkGetInstanceProcAddr,
+                                                      .vulkanCreateInfo = &ci,
+                                                      .vulkanAllocator = nullptr};
+
+  auto xrCreateVulkanInstanceKHR = (PFN_xrCreateVulkanInstanceKHR)getXRFunction(xrParams.instance, "xrCreateVulkanInstanceKHR");
+
+  VkResult xrInstanceVkResult;
+  XrResult xrInstanceRes = xrCreateVulkanInstanceKHR(xrParams.instance, &xrInstanceCi, &vkInstance_, &xrInstanceVkResult);
+#else
   VK_ASSERT(vkCreateInstance(&ci, nullptr, &vkInstance_));
 
   volkLoadInstance(vkInstance_);
+#endif
 
-  // Update MoltenVK configuration.
+// Update MoltenVK configuration.
 #if defined(__APPLE__)
   void* moltenVkModule = dlopen("libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
   PFN_vkGetMoltenVKConfigurationMVK vkGetMoltenVKConfigurationMVK =
@@ -4382,7 +4419,12 @@ uint32_t lvk::VulkanContext::queryDevices(HWDeviceType deviceType, HWDeviceDesc*
   return numCompatibleDevices;
 }
 
-lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc) {
+lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
+#ifdef LVK_WITH_OPENXR
+                                            ,
+                                            const XrInstance& xrInstance
+#endif
+) {
   if (desc.guid == 0UL) {
     LLOGW("Invalid hardwareGuid(%lu)", desc.guid);
     return Result(Result::Code::RuntimeError, "Vulkan is not supported");
@@ -4710,13 +4752,28 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc) {
     }
   }
 
+#ifdef LVK_WITH_OPENXR
+  const XrVulkanDeviceCreateInfoKHR xrVkDeviceCi = {.type = XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR,
+                                                    .pfnGetInstanceProcAddr = vkGetInstanceProcAddr,
+                                                    .vulkanPhysicalDevice = vkPhysicalDevice_,
+                                                    .vulkanCreateInfo = &ci,
+                                                    .vulkanAllocator = nullptr};
+
+  auto xrCreateVulkanDeviceKHR = (PFN_xrCreateVulkanDeviceKHR)getXRFunction(xrInstance, "xrCreateVulkanDeviceKHR");
+
+  VkResult vkCreateVkDeviceRes;
+  XrResult xrCreateVkDeviceRes = xrCreateVulkanDeviceKHR(xrInstance, &xrVkDeviceCi, &vkDevice_, &vkCreateVkDeviceRes);
+#else
+
   VK_ASSERT_RETURN(vkCreateDevice(vkPhysicalDevice_, &ci, nullptr, &vkDevice_));
 
   volkLoadDevice(vkDevice_);
 
+#endif
+
 #if defined(__APPLE__)
-  vkCmdBeginRendering = vkCmdBeginRenderingKHR;
-  vkCmdEndRendering = vkCmdEndRenderingKHR;
+   vkCmdBeginRendering = vkCmdBeginRenderingKHR;
+   vkCmdEndRendering = vkCmdEndRenderingKHR;
 #endif
 
   vkGetDeviceQueue(vkDevice_, deviceQueues_.graphicsQueueFamilyIndex, 0, &deviceQueues_.graphicsQueue);
