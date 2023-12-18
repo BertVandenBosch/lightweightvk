@@ -573,7 +573,7 @@ class VulkanContext final : public IContext {
   lvk::Result initContext(const HWDeviceDesc& desc
 #ifdef LVK_WITH_OPENXR
                           ,
-                          const XrInstance& xrInstance
+                          const XRParams& xrParams
 #endif
   );
   lvk::Result initSwapchain(uint32_t width, uint32_t height);

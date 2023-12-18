@@ -4423,7 +4423,7 @@ uint32_t lvk::VulkanContext::queryDevices(HWDeviceType deviceType, HWDeviceDesc*
 lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
 #ifdef LVK_WITH_OPENXR
                                             ,
-                                            const XrInstance& xrInstance
+                                            const XRParams& xrParams
 #endif
 ) {
   if (desc.guid == 0UL) {
@@ -4755,15 +4755,18 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
 
 #ifdef LVK_WITH_OPENXR
   const XrVulkanDeviceCreateInfoKHR xrVkDeviceCi = {.type = XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR,
+                                                    .systemId = xrParams.systemId,
                                                     .pfnGetInstanceProcAddr = vkGetInstanceProcAddr,
                                                     .vulkanPhysicalDevice = vkPhysicalDevice_,
                                                     .vulkanCreateInfo = &ci,
                                                     .vulkanAllocator = nullptr};
 
-  auto xrCreateVulkanDeviceKHR = (PFN_xrCreateVulkanDeviceKHR)getXRFunction(xrInstance, "xrCreateVulkanDeviceKHR");
+  auto xrCreateVulkanDeviceKHR = (PFN_xrCreateVulkanDeviceKHR)getXRFunction(xrParams.instance, "xrCreateVulkanDeviceKHR");
 
   VkResult vkCreateVkDeviceRes;
-  XrResult xrCreateVkDeviceRes = xrCreateVulkanDeviceKHR(xrInstance, &xrVkDeviceCi, &vkDevice_, &vkCreateVkDeviceRes);
+  XrResult xrCreateVkDeviceRes = xrCreateVulkanDeviceKHR(xrParams.instance, &xrVkDeviceCi, &vkDevice_, &vkCreateVkDeviceRes);
+
+  VK_ASSERT_RETURN(vkCreateVkDeviceRes);
 #else
 
   VK_ASSERT_RETURN(vkCreateDevice(vkPhysicalDevice_, &ci, nullptr, &vkDevice_));
