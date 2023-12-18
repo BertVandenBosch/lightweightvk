@@ -4287,9 +4287,9 @@ void lvk::VulkanContext::createInstance(
   XrResult xrInstanceRes = xrCreateVulkanInstanceKHR(xrParams->instance, &xrInstanceCi, &vkInstance_, &xrInstanceVkResult);
 #else
   VK_ASSERT(vkCreateInstance(&ci, nullptr, &vkInstance_));
+#endif
 
   volkLoadInstance(vkInstance_);
-#endif
 
 // Update MoltenVK configuration.
 #if defined(__APPLE__)
@@ -4767,10 +4767,9 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
 #else
 
   VK_ASSERT_RETURN(vkCreateDevice(vkPhysicalDevice_, &ci, nullptr, &vkDevice_));
+#endif
 
   volkLoadDevice(vkDevice_);
-
-#endif
 
 #if defined(__APPLE__)
    vkCmdBeginRendering = vkCmdBeginRenderingKHR;
