@@ -19,7 +19,7 @@ option(LVK_WITH_SAMPLES         "Enable sample demo apps"       ON)
 option(LVK_WITH_TRACY           "Enable Tracy profiler"         ON)
 option(LVK_WITH_WAYLAND         "Enable Wayland"                OFF)
 option(LVK_WITH_IMPLOT          "Enable ImPlot"                 ON)
-option(LVK_WITH_OPENXR          "Enable OpenXR"                 ON)
+option(LVK_WITH_OPENXR          "Enable OpenXR"                 OFF)
 
 cmake_dependent_option(LVK_WITH_VULKAN_PORTABILITY "Enable portability extension" ON "APPLE" OFF)
 # cmake-format: on
