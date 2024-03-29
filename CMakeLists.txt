@@ -12,16 +12,20 @@ project("LVK" CXX C)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # cmake-format: off
-option(LVK_CUSTOM_MOLTENVK_PATH "Path to custom MoltenVK"       "")
-option(LVK_DEPLOY_DEPS          "Deploy dependencies via CMake" ON)
-option(LVK_WITH_GLFW            "Enable GLFW"                   ON)
-option(LVK_WITH_SAMPLES         "Enable sample demo apps"       ON)
-option(LVK_WITH_TRACY           "Enable Tracy profiler"         ON)
-option(LVK_WITH_WAYLAND         "Enable Wayland"                OFF)
-option(LVK_WITH_IMPLOT          "Enable ImPlot"                 ON)
-option(LVK_WITH_OPENXR          "Enable OpenXR"                 OFF)
+option(LVK_DEPLOY_DEPS             "Deploy dependencies via CMake"           ON)
+option(LVK_WITH_GLFW               "Enable GLFW"                             ON)
+option(LVK_WITH_SAMPLES            "Enable sample demo apps"                 ON)
+option(LVK_WITH_SAMPLES_ANDROID    "Generate Android projects for demo apps" OFF)
+option(LVK_WITH_TRACY              "Enable Tracy profiler"                   ON)
+option(LVK_WITH_WAYLAND            "Enable Wayland"                          OFF)
+option(LVK_WITH_IMPLOT             "Enable ImPlot"                           ON)
+option(LVK_WITH_OPENXR             "Enable OpenXR"                           OFF)
+option(LVK_WITH_ANDROID_VALIDATION "Enable validation layers on Android"     ON)
 
 cmake_dependent_option(LVK_WITH_VULKAN_PORTABILITY "Enable portability extension" ON "APPLE" OFF)
+
+set(LVK_ANDROID_ABI "\'arm64-v8a\'" CACHE STRING "Enabled ABI on Android")
+set(LVK_CUSTOM_MOLTENVK_PATH "" CACHE STRING "Path to custom MoltenVK")
 # cmake-format: on
 
 if(LVK_WITH_SAMPLES AND NOT LVK_WITH_GLFW)
@@ -32,7 +36,6 @@ endif()
 if(ANDROID)
   message(STATUS "WARNING: LVK_WITH_GLFW and LVK_WITH_SAMPLES were set to OFF for Android")
   set(LVK_WITH_GLFW OFF)
-  set(LVK_WITH_SAMPLES OFF)
 endif()
 
 if(LVK_WITH_WAYLAND AND (ANDROID OR APPLE OR WIN32))
@@ -73,11 +76,19 @@ endfunction()
 message(STATUS "LVK_DEPLOY_DEPS             = ${LVK_DEPLOY_DEPS}")
 message(STATUS "LVK_WITH_GLFW               = ${LVK_WITH_GLFW}")
 message(STATUS "LVK_WITH_SAMPLES            = ${LVK_WITH_SAMPLES}")
+message(STATUS "LVK_WITH_SAMPLES_ANDROID    = ${LVK_WITH_SAMPLES_ANDROID}")
 message(STATUS "LVK_WITH_TRACY              = ${LVK_WITH_TRACY}")
 message(STATUS "LVK_WITH_VULKAN_PORTABILITY = ${LVK_WITH_VULKAN_PORTABILITY}")
 message(STATUS "LVK_WITH_WAYLAND            = ${LVK_WITH_WAYLAND}")
 message(STATUS "LVK_WITH_IMPLOT             = ${LVK_WITH_IMPLOT}")
 message(STATUS "LVK_WITH_OPENXR             = ${LVK_WITH_OPENXR}")
+# cmake-format: on
+
+# cmake-format: off
+if(LVK_WITH_SAMPLES_ANDROID)
+  message(STATUS "LVK_ANDROID_ABI             = ${LVK_ANDROID_ABI}")
+  message(STATUS "LVK_WITH_ANDROID_VALIDATION = ${LVK_WITH_ANDROID_VALIDATION}")
+endif()
 # cmake-format: on
 
 if(NOT DEFINED CMAKE_BUILD_TYPE)
@@ -94,6 +105,9 @@ set(LVK_DEPS_CACHE_FILE "${LVK_ROOT_DIR}/third-party/.bootstrap-deps.json")
 find_package(Python3 COMPONENTS Interpreter)
 
 message(STATUS "LVK_ROOT_DIR = " ${LVK_ROOT_DIR})
+
+# enable multithreaded builds for Visual Studio
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
 
 if(LVK_DEPLOY_DEPS)
   # deploy dependencies during configuration
@@ -125,10 +139,17 @@ if(LVK_WITH_TRACY)
 endif()
 
 if(LVK_WITH_OPENXR)
-  add_definitions("-DXR_USE_GRAPHICS_API_VULKAN")
+  if(NOT WIN32)
+    message(FATAL_ERROR "OpenXR can be enabled only on Windows.")
+  endif()
   add_subdirectory(third-party/deps/src/openxr-sdk)
+  # cmake-format: off
+  lvk_set_folder(openxr_loader             "third-party/OpenXR")
+  lvk_set_folder(generate_openxr_header    "third-party/OpenXR")
+  lvk_set_folder(xr_common_generated_files "third-party/OpenXR")
+  lvk_set_folder(xr_global_generated_files "third-party/OpenXR")
+  # cmake-format: on
 endif()
-
 
 # temporary
 if(NOT LVK_USE_CUSTOM_MOLTENVK)
@@ -168,6 +189,10 @@ endif()
 add_library(LVKstb third-party/deps/patches/stb_impl/stb_image.c third-party/deps/patches/stb_impl/stb_image_resize2.c
                    third-party/deps/patches/stb_impl/stb_image_write.c)
 target_include_directories(LVKstb PUBLIC "third-party/deps/src/stb")
+if(ANDROID)
+  target_compile_definitions(LVKstb PUBLIC "STBI_NO_SIMD=1")
+  target_compile_definitions(LVKstb PUBLIC "STBIR_NO_SIMD=1")
+endif()
 lvk_set_folder(LVKstb "LVK")
 
 # cmake-format: off
@@ -206,7 +231,7 @@ if(LVK_WITH_SAMPLES)
   include_directories("third-party/deps/src/stb")
   include_directories("third-party/deps/src/taskflow")
   include_directories("third-party/deps/src/3D-Graphics-Rendering-Cookbook")
-  if(UNIX)
+  if(UNIX AND NOT ANDROID)
     find_package(OpenGL REQUIRED)
   endif()
   # cmake-format: off
@@ -227,13 +252,8 @@ if(LVK_WITH_SAMPLES)
   lvk_set_folder(ktx_version "third-party/ktx-software")
   lvk_set_folder(obj_basisu_cbind "third-party/ktx-software")
   lvk_set_folder(objUtil "third-party/ktx-software")
-  lvk_set_folder(fmt "third-party")
-  if(NOT ANDROID AND NOT APPLE)
+  if(TARGET astcenc-avx2-static)
     lvk_set_folder(astcenc-avx2-static "third-party/ktx-software")
-    lvk_set_folder(makedfd2vk "third-party/ktx-software")
-    lvk_set_folder(makevk2dfd "third-party/ktx-software")
-    lvk_set_folder(mkvk "third-party/ktx-software")
-    lvk_set_folder(mkvkformatfiles "third-party/ktx-software")
   endif()
   add_subdirectory(third-party/deps/src/bc7enc)
   lvk_set_cxxstd(bc7enc 17)
@@ -250,6 +270,13 @@ endif()
 
 if(LVK_WITH_TRACY)
   target_link_libraries(LVKLibrary PUBLIC TracyClient)
+endif()
+
+if(LVK_WITH_OPENXR)
+  target_compile_definitions(LVKVulkan PRIVATE "XR_USE_GRAPHICS_API_VULKAN=1")
+  target_compile_definitions(LVKLibrary PUBLIC "LVK_WITH_OPENXR=1")
+  target_link_libraries(LVKLibrary PUBLIC OpenXR::openxr_loader)
+  target_include_directories(LVKLibrary PUBLIC "${LVK_ROOT_DIR}/third-party/deps/src/openxr-sdk/include")
 endif()
 
 # ImGui

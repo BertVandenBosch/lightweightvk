@@ -6,7 +6,7 @@ LightweightVK is a deeply refactored fork of [IGL](https://github.com/facebook/i
 The main goals of LightweightVK:
 
 1. **Lean.** Minimalistic API without bloat (no `std::vector`, `std::unordered_map` etc in the API).
-2. **Bindless.** Utilize Vulkan 1.3+ dynamic rendering, descriptor indexing, and buffer device address features for modern API design.
+2. **Bindless.** Utilize Vulkan 1.3+ dynamic rendering, descriptor indexing, and buffer device address features for modern bindless-only API design.
 3. **Agile.** A playground for experiments to enable quick exploration of ideas and adoption of Vulkan API changes.
 Designed for rapid prototyping of Vulkan-based renderers.
 
@@ -14,7 +14,7 @@ There are no plans to keep this fork in sync with the upstream.
 
 ## Supported rendering backends
 
- * Vulkan 1.3 (Windows, Linux)
+ * Vulkan 1.3 (Windows, Linux, Android)
  * Vulkan 1.2 + extensions (MacOS)
 
 ## Supported platforms
@@ -22,17 +22,21 @@ There are no plans to keep this fork in sync with the upstream.
  * Linux
  * Windows
  * MacOS (via MoltenVK)
+ * Android
 
 ## API Support
 
-|                          | Windows                    | Linux                      | MacOS
-| ------------------------ | -------------------------- | -------------------------- | -------------------------- |
-| Vulkan 1.3               | :heavy_check_mark:         | :heavy_check_mark:         | :heavy_exclamation_mark:   |
-| Vulkan 1.2               |                            |                            | :heavy_check_mark:         |
+|                          | Windows                    | Linux                      | MacOS                      | Android                    |
+| ------------------------ | -------------------------- | -------------------------- | -------------------------- | -------------------------- |
+| Vulkan 1.3               | :heavy_check_mark:         | :heavy_check_mark:         | :heavy_exclamation_mark:   | :heavy_check_mark:         |
+| Vulkan 1.2               |                            |                            | :heavy_check_mark:         |                            |
 
-:heavy_exclamation_mark: On MacOS dynamic rendering and subgroup size control required by LightweightVK are available via extensions `VK_KHR_dynamic_rendering` and `VK_EXT_subgroup_size_control`. `VK_KHR_maintenance4` and `VK_KHR_synchronization2` are not currently supported.
+On MacOS, features required by LightweightVK are available via extensions `VK_KHR_dynamic_rendering`, `VK_EXT_subgroup_size_control`,
+`VK_EXT_extended_dynamic_state`, `VK_EXT_extended_dynamic_state2`, and `VK_KHR_synchronization2`.
 
-Check [here](https://github.com/KhronosGroup/MoltenVK/issues/1930) the status of Vulkan 1.3 support in MoltenVK.
+:heavy_exclamation_mark: `VK_KHR_maintenance4` is not yet supported in MoltenVK :heavy_exclamation_mark:
+
+Check the status of [Vulkan 1.3 support](https://github.com/KhronosGroup/MoltenVK/issues/1930) in MoltenVK.
 
 ## Build
 
@@ -65,12 +69,40 @@ cmake .. -G "Unix Makefiles"
 
 ### MacOS
 
-:heavy_exclamation_mark: Be sure that VulkanSDK 1.3.261.1+ for MacOS is installed https://vulkan.lunarg.com/sdk/home#mac
+:heavy_exclamation_mark: Be sure that VulkanSDK 1.3.275.0 for MacOS is installed https://vulkan.lunarg.com/sdk/home#mac
 
 ```
 cd build
 cmake .. -G "Xcode"
 ```
+
+### Android
+
+:heavy_exclamation_mark: Be sure that [Android Studio](https://developer.android.com/studio) is set up.
+
+:heavy_exclamation_mark: Be sure that the `ANDROID_NDK` environment variable points to your Android NDK.
+
+:heavy_exclamation_mark: Be sure that the `JAVA_HOME` environment variable is set to the path of the Java Runtime.
+
+:heavy_exclamation_mark: Be sure that the `adb` platform tool is in the `PATH` environment variable.
+
+```
+cd build
+cmake .. -DLVK_WITH_SAMPLES_ANDROID=ON
+cd android/Tiny                         # or any other sample
+./gradlew assembleDebug                 # or assembleRelease
+```
+You can also open the project in Android Studio and build it from there.
+
+Before running demo apps on your device, connect the device to a desktop machine and run the deployment script:
+
+```
+python3 deploy_content_android.py
+```
+
+> NOTE: To run demos on an Android device, it should support Vulkan 1.3. Please check https://vulkan.gpuinfo.org/listdevices.php?platform=android 
+
+> NOTE: At the moment, no touch input is supported on Android.
 
 ## Screenshots
 

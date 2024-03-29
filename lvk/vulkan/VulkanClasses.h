@@ -206,9 +206,6 @@ class VulkanSwapchain final {
   const VkSurfaceFormatKHR& getSurfaceFormat() const;
   uint32_t getNumSwapchainImages() const;
 
- public:
-  VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE;
-
  private:
   VulkanContext& ctx_;
   VkDevice device_ = VK_NULL_HANDLE;
@@ -221,6 +218,8 @@ class VulkanSwapchain final {
   VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
   VkSurfaceFormatKHR surfaceFormat_ = {.format = VK_FORMAT_UNDEFINED};
   TextureHandle swapchainTextures_[LVK_MAX_SWAPCHAIN_IMAGES] = {};
+  VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE;
+  VkFence acquireFence_ = VK_NULL_HANDLE;
 };
 
 class VulkanImmediateCommands final {
@@ -248,6 +247,7 @@ class VulkanImmediateCommands final {
   SubmitHandle submit(const CommandBufferWrapper& wrapper);
   void waitSemaphore(VkSemaphore semaphore);
   VkSemaphore acquireLastSubmitSemaphore();
+  VkFence getVkFence(SubmitHandle handle) const;
   SubmitHandle getLastSubmitHandle() const;
   bool isReady(SubmitHandle handle, bool fastCheckNoVulkan = false) const;
   void wait(SubmitHandle handle);
@@ -270,19 +270,7 @@ class VulkanImmediateCommands final {
   uint32_t submitCounter_ = 1;
 };
 
-struct RenderPipelineDynamicState final {
-#if defined(__APPLE__)
-  VkCompareOp depthCompareOp_ : 3 = VK_COMPARE_OP_ALWAYS;
-  VkBool32 depthWriteEnable_ : 1 = VK_FALSE;
-#endif
-  VkBool32 depthBiasEnable_ : 1 = VK_FALSE;
-};
-
-static_assert(sizeof(RenderPipelineDynamicState) == sizeof(uint32_t));
-
 struct RenderPipelineState final {
-  void destroyPipelines(lvk::VulkanContext* ctx);
-
   RenderPipelineDesc desc_;
 
   uint32_t numBindings_ = 0;
@@ -290,16 +278,12 @@ struct RenderPipelineState final {
   VkVertexInputBindingDescription vkBindings_[VertexInput::LVK_VERTEX_BUFFER_MAX] = {};
   VkVertexInputAttributeDescription vkAttributes_[VertexInput::LVK_VERTEX_ATTRIBUTES_MAX] = {};
 
-  // non-owning, cached the last pipeline layout from the context (if the context has a new layout, invalidate all VkPipeline objects)
-  VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
+  // non-owning, the last seen VkDescriptorSetLayout from VulkanContext::vkDSL_ (if the context has a new layout, invalidate all VkPipeline objects)
+  VkDescriptorSetLayout lastVkDescriptorSetLayout_ = VK_NULL_HANDLE;
 
-#if !defined(__APPLE__)
-  // [depthBiasEnable]
-  VkPipeline pipelines_[2] = {};
-#else
-  // [depthCompareOp][depthWriteEnable][depthBiasEnable]
-  VkPipeline pipelines_[8][2][2] = {};
-#endif // __APPLE__
+  VkShaderStageFlags shaderStageFlags_ = 0;
+  VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
+  VkPipeline pipeline_ = VK_NULL_HANDLE;
 };
 
 class VulkanPipelineBuilder final {
@@ -307,11 +291,6 @@ class VulkanPipelineBuilder final {
   VulkanPipelineBuilder();
   ~VulkanPipelineBuilder() = default;
 
-  VulkanPipelineBuilder& depthBiasEnable(bool enable);
-#if defined(__APPLE__)
-  VulkanPipelineBuilder& depthWriteEnable(bool enable);
-  VulkanPipelineBuilder& depthCompareOp(VkCompareOp compareOp);
-#endif
   VulkanPipelineBuilder& dynamicState(VkDynamicState state);
   VulkanPipelineBuilder& primitiveTopology(VkPrimitiveTopology topology);
   VulkanPipelineBuilder& rasterizationSamples(VkSampleCountFlagBits samples);
@@ -370,9 +349,17 @@ class VulkanPipelineBuilder final {
 
 struct ComputePipelineState final {
   ComputePipelineDesc desc_;
-  // non-owning, cached the last pipeline layout from the context
+
+  // non-owning, the last seen VkDescriptorSetLayout from VulkanContext::vkDSL_ (invalidate all VkPipeline objects on new layout)
+  VkDescriptorSetLayout lastVkDescriptorSetLayout_ = VK_NULL_HANDLE;
+
   VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline pipeline_ = VK_NULL_HANDLE;
+};
+
+struct ShaderModuleState final {
+  VkShaderModule sm = VK_NULL_HANDLE;
+  uint32_t pushConstantsSize = 0;
 };
 
 class CommandBuffer final : public ICommandBuffer {
@@ -437,7 +424,6 @@ class CommandBuffer final : public ICommandBuffer {
  private:
   void useComputeTexture(TextureHandle texture);
   void bufferBarrier(BufferHandle handle, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage);
-  void bindGraphicsPipeline();
 
  private:
   friend class VulkanContext;
@@ -452,8 +438,8 @@ class CommandBuffer final : public ICommandBuffer {
 
   bool isRendering_ = false;
 
-  lvk::RenderPipelineHandle currentPipeline_ = {};
-  lvk::RenderPipelineDynamicState dynamicState_ = {};
+  lvk::RenderPipelineHandle currentPipelineGraphics_ = {};
+  lvk::ComputePipelineHandle currentPipelineCompute_ = {};
 };
 
 class VulkanStagingDevice final {
@@ -567,7 +553,7 @@ class VulkanContext final : public IContext {
   ///////////////
 
   VkPipeline getVkPipeline(ComputePipelineHandle handle);
-  VkPipeline getVkPipeline(RenderPipelineHandle handle, const RenderPipelineDynamicState& dynamicState);
+  VkPipeline getVkPipeline(RenderPipelineHandle handle);
 
   uint32_t queryDevices(HWDeviceType deviceType, HWDeviceDesc* outDevices, uint32_t maxOutDevices = 1);
   lvk::Result initContext(const HWDeviceDesc& desc
@@ -626,7 +612,7 @@ class VulkanContext final : public IContext {
   void* getVmaAllocator() const;
 
   void checkAndUpdateDescriptorSets();
-  void bindDefaultDescriptorSets(VkCommandBuffer cmdBuf, VkPipelineBindPoint bindPoint) const;
+  void bindDefaultDescriptorSets(VkCommandBuffer cmdBuf, VkPipelineBindPoint bindPoint, VkPipelineLayout layout) const;
 
   // for shaders debugging
   void invokeShaderModuleErrorCallback(int line, int col, const char* debugName, VkShaderModule sm);
@@ -640,8 +626,8 @@ class VulkanContext final : public IContext {
   void processDeferredTasks() const;
   void waitDeferredTasks();
   lvk::Result growDescriptorPool(uint32_t maxTextures, uint32_t maxSamplers);
-  VkShaderModule createShaderModule(const void* data, size_t length, const char* debugName, Result* outResult) const;
-  VkShaderModule createShaderModule(ShaderStage stage, const char* source, const char* debugName, Result* outResult) const;
+  ShaderModuleState createShaderModuleFromSPIRV(const void* spirv, size_t numBytes, const char* debugName, Result* outResult) const;
+  ShaderModuleState createShaderModuleFromGLSL(ShaderStage stage, const char* source, const char* debugName, Result* outResult) const;
 
  private:
   friend class lvk::VulkanSwapchain;
@@ -683,11 +669,9 @@ class VulkanContext final : public IContext {
   std::unique_ptr<lvk::VulkanStagingDevice> stagingDevice_;
   uint32_t currentMaxTextures_ = 16;
   uint32_t currentMaxSamplers_ = 16;
-  VkPipelineLayout vkPipelineLayout_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout vkDSL_ = VK_NULL_HANDLE;
   VkDescriptorPool vkDPool_ = VK_NULL_HANDLE;
   VkDescriptorSet vkDSet_ = VK_NULL_HANDLE;
-  SubmitHandle lastSubmitHandle = SubmitHandle(); // a handle of the last submit this descriptor set was a part of
   // don't use staging on devices with shared host-visible memory
   bool useStaging_ = true;
 
@@ -700,7 +684,7 @@ class VulkanContext final : public IContext {
 
   lvk::ContextConfig config_;
 
-  lvk::Pool<lvk::ShaderModule, VkShaderModule> shaderModulesPool_;
+  lvk::Pool<lvk::ShaderModule, lvk::ShaderModuleState> shaderModulesPool_;
   lvk::Pool<lvk::RenderPipeline, lvk::RenderPipelineState> renderPipelinesPool_;
   lvk::Pool<lvk::ComputePipeline, lvk::ComputePipelineState> computePipelinesPool_;
   lvk::Pool<lvk::Sampler, VkSampler> samplersPool_;
