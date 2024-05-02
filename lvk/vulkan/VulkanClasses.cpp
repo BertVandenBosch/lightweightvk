@@ -3446,7 +3446,7 @@ lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureD
   VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
   switch (desc.type) {
   case TextureType_2D:
-    imageViewType = VK_IMAGE_VIEW_TYPE_2D;
+    imageViewType = desc.numLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     imageType = VK_IMAGE_TYPE_2D;
     samples = lvk::getVulkanSampleCountFlags(desc.numSamples);
     break;

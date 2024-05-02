@@ -189,7 +189,8 @@ struct VulkanTexture final {
 
   std::shared_ptr<lvk::VulkanImage> image_;
   VkImageView imageView_ = VK_NULL_HANDLE; // all mip-levels
-  VkImageView imageViewForFramebuffer_[LVK_MAX_MIP_LEVELS][6] = {}; // max 6 faces for cubemap rendering
+  VkImageView imageViewForFramebuffer_[LVK_MAX_MIP_LEVELS][16] = {}; // This number is chosen to fit my personal needs (HBAOplus
+                                                                     // deinterleave texture2DArray target)
 };
 
 class VulkanSwapchain final {
