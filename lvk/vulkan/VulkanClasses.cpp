@@ -573,7 +573,7 @@ bool hasExtension(const char* ext, const std::vector<VkExtensionProperties>& pro
   return false;
 }
 
-void transitionToColorAttachment(VkCommandBuffer buffer, lvk::VulkanTexture* colorTex) {
+void transitionToColorAttachment(VkCommandBuffer buffer, lvk::VulkanTexture* colorTex, const lvk::RenderPass::AttachmentDesc& attachDesc) {
   if (!LVK_VERIFY(colorTex)) {
     return;
   }
@@ -584,12 +584,17 @@ void transitionToColorAttachment(VkCommandBuffer buffer, lvk::VulkanTexture* col
     return;
   }
   LVK_ASSERT_MSG(colorImg.vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid color attachment format");
+
+  const uint32_t numLayers = colorTex->image_->numLayers_;
+  const uint32_t startLayer = numLayers > 1 ? attachDesc.layer : 0;
+  const uint32_t layerRange = numLayers > 1 ? 1 : VK_REMAINING_ARRAY_LAYERS;
+
   colorImg.transitionLayout(buffer,
                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // wait for all subsequent
                                                                                                           // fragment/compute shaders
-                            VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
+                            VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, startLayer, layerRange});
 }
 
 bool isDepthOrStencilVkFormat(VkFormat format) {
@@ -2269,14 +2274,14 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
 
   // transition all the color attachments
   for (uint32_t i = 0; i != numFbColorAttachments; i++) {
-    if (const auto handle = fb.color[i].texture) {
+    if (const auto& handle = fb.color[i].texture) {
       lvk::VulkanTexture* colorTex = ctx_->texturesPool_.get(handle);
-      transitionToColorAttachment(wrapper_->cmdBuf_, colorTex);
+      transitionToColorAttachment(wrapper_->cmdBuf_, colorTex, renderPass.color[i]);
     }
     // handle MSAA
     if (TextureHandle handle = fb.color[i].resolveTexture) {
       lvk::VulkanTexture* colorResolveTex = ctx_->texturesPool_.get(handle);
-      transitionToColorAttachment(wrapper_->cmdBuf_, colorResolveTex);
+      transitionToColorAttachment(wrapper_->cmdBuf_, colorResolveTex, renderPass.color[i]);
     }
   }
   // transition depth-stencil attachment
