@@ -301,6 +301,7 @@ class VulkanPipelineBuilder final {
                                          VkStencilOp passOp,
                                          VkStencilOp depthFailOp,
                                          VkCompareOp compareOp);
+  VulkanPipelineBuilder& customDepthRange(bool useCustomRange);
   VulkanPipelineBuilder& stencilMasks(VkStencilFaceFlags faceMask, uint32_t compareMask, uint32_t writeMask, uint32_t reference);
   VulkanPipelineBuilder& cullMode(VkCullModeFlags mode);
   VulkanPipelineBuilder& frontFace(VkFrontFace mode);

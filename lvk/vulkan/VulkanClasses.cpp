@@ -1987,6 +1987,11 @@ lvk::VulkanPipelineBuilder& lvk::VulkanPipelineBuilder::stencilStateOps(VkStenci
   return *this;
 }
 
+lvk::VulkanPipelineBuilder& lvk::VulkanPipelineBuilder::customDepthRange(bool useCustomRange) {
+  depthStencilState_.minDepthBounds = useCustomRange ? -1.0f : 0.0f;
+  return *this;
+}
+
 lvk::VulkanPipelineBuilder& lvk::VulkanPipelineBuilder::stencilMasks(VkStencilFaceFlags faceMask,
                                                                      uint32_t compareMask,
                                                                      uint32_t writeMask,
@@ -2496,7 +2501,7 @@ void lvk::CommandBuffer::cmdBindDepthState(const DepthState& desc) {
 
   const VkCompareOp op = compareOpToVkCompareOp(desc.compareOp);
   vkCmdSetDepthWriteEnable(wrapper_->cmdBuf_, desc.isDepthWriteEnabled ? VK_TRUE : VK_FALSE);
-  vkCmdSetDepthTestEnable(wrapper_->cmdBuf_, op != VK_COMPARE_OP_ALWAYS);
+  vkCmdSetDepthTestEnable(wrapper_->cmdBuf_, !(op == VK_COMPARE_OP_ALWAYS && !desc.isDepthWriteEnabled));
 
 #if defined(ANDROID)
   // This is a workaround for the issue.
@@ -3526,7 +3531,7 @@ lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureD
   if (desc.data) {
     LVK_ASSERT(desc.type == TextureType_2D || desc.type == TextureType_Cube);
     LVK_ASSERT(desc.dataNumMipLevels <= desc.numMipLevels);
-    const uint32_t numLayers = desc.type == TextureType_Cube ? 6 : 1;
+    const uint32_t numLayers = desc.type == TextureType_Cube ? 6 : desc.numLayers;
     Result res = upload(handle, {.dimensions = desc.dimensions, .numLayers = numLayers, .numMipLevels = desc.dataNumMipLevels}, desc.data);
     if (!res.isOk()) {
       Result::setResult(outResult, res);
@@ -3701,6 +3706,7 @@ VkPipeline lvk::VulkanContext::getVkPipeline(RenderPipelineHandle handle) {
                        compareOpToVkCompareOp(desc.backFaceStencil.stencilCompareOp))
       .stencilMasks(VK_STENCIL_FACE_FRONT_BIT, 0xFF, desc.frontFaceStencil.writeMask, desc.frontFaceStencil.readMask)
       .stencilMasks(VK_STENCIL_FACE_BACK_BIT, 0xFF, desc.backFaceStencil.writeMask, desc.backFaceStencil.readMask)
+      .customDepthRange(desc.extendedDepthRange)
       .shaderStage(lvk::getPipelineShaderStageCreateInfo(VK_SHADER_STAGE_VERTEX_BIT, vertModule->sm, desc.entryPointVert, &si))
       .shaderStage(lvk::getPipelineShaderStageCreateInfo(VK_SHADER_STAGE_FRAGMENT_BIT, fragModule->sm, desc.entryPointFrag, &si))
       .shaderStage(tescModule ? lvk::getPipelineShaderStageCreateInfo(
@@ -4636,32 +4642,33 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
   const uint32_t numQueues = ciQueue[0].queueFamilyIndex == ciQueue[1].queueFamilyIndex ? 1 : 2;
 
   const char* deviceExtensionNames[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+      VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+      VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME,
 #if defined(LVK_WITH_TRACY)
-    VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
+      VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
 #endif
 #if defined(__APPLE__)
-    // All supported Vulkan 1.3 extensions
-    // https://github.com/KhronosGroup/MoltenVK/issues/1930
-    VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME,
-    VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-    VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
-    VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-    VK_EXT_4444_FORMATS_EXTENSION_NAME,
-    VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
-    VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,
-    VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME,
-    VK_EXT_INLINE_UNIFORM_BLOCK_EXTENSION_NAME,
-    VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME,
-    VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME,
-    VK_EXT_PRIVATE_DATA_EXTENSION_NAME,
-    VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME,
-    VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,
-    VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME,
-    VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME,
+      // All supported Vulkan 1.3 extensions
+      // https://github.com/KhronosGroup/MoltenVK/issues/1930
+      VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME,
+      VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+      VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
+      VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+      VK_EXT_4444_FORMATS_EXTENSION_NAME,
+      VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+      VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,
+      VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME,
+      VK_EXT_INLINE_UNIFORM_BLOCK_EXTENSION_NAME,
+      VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME,
+      VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME,
+      VK_EXT_PRIVATE_DATA_EXTENSION_NAME,
+      VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME,
+      VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,
+      VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME,
+      VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME,
 #endif
 #if defined(LVK_WITH_VULKAN_PORTABILITY)
-    "VK_KHR_portability_subset",
+      "VK_KHR_portability_subset",
 #endif
   };
 
