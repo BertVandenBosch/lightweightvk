@@ -16,8 +16,8 @@
 #include "VulkanClasses.h"
 #include "VulkanUtils.h"
 
-#include <glslang/Include/glslang_c_interface.h>
 #include <SPIRV-Reflect/spirv_reflect.h>
+#include <glslang/Include/glslang_c_interface.h>
 #include <ldrutils/lutils/ScopeExit.h>
 
 #ifndef VK_USE_PLATFORM_WIN32_KHR
@@ -573,28 +573,22 @@ bool hasExtension(const char* ext, const std::vector<VkExtensionProperties>& pro
   return false;
 }
 
-void transitionToColorAttachment(VkCommandBuffer buffer, lvk::VulkanTexture* colorTex, const lvk::RenderPass::AttachmentDesc& attachDesc) {
+void transitionToColorAttachment(VkCommandBuffer buffer, lvk::VulkanImage* colorTex) {
   if (!LVK_VERIFY(colorTex)) {
     return;
   }
 
-  const lvk::VulkanImage& colorImg = *colorTex->image_.get();
-  if (!LVK_VERIFY(!colorImg.isDepthFormat_ && !colorImg.isStencilFormat_)) {
+  if (!LVK_VERIFY(!colorTex->isDepthFormat_ && !colorTex->isStencilFormat_)) {
     LVK_ASSERT_MSG(false, "Color attachments cannot have depth/stencil formats");
     return;
   }
-  LVK_ASSERT_MSG(colorImg.vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid color attachment format");
-
-  const uint32_t numLayers = colorTex->image_->numLayers_;
-  const uint32_t startLayer = numLayers > 1 ? attachDesc.layer : 0;
-  const uint32_t layerRange = numLayers > 1 ? 1 : VK_REMAINING_ARRAY_LAYERS;
-
-  colorImg.transitionLayout(buffer,
-                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // wait for all subsequent
-                                                                                                          // fragment/compute shaders
-                            VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, startLayer, layerRange});
+  LVK_ASSERT_MSG(colorTex->vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid color attachment format");
+  colorTex->transitionLayout(buffer,
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // wait for all subsequent
+                                                                                                           // fragment/compute shaders
+                             VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
 }
 
 bool isDepthOrStencilVkFormat(VkFormat format) {
@@ -687,159 +681,13 @@ struct VulkanContextImpl final {
 
 } // namespace lvk
 
-lvk::VulkanBuffer::VulkanBuffer(lvk::VulkanContext* ctx,
-                                VkDevice device,
-                                VkDeviceSize bufferSize,
-                                VkBufferUsageFlags usageFlags,
-                                VkMemoryPropertyFlags memFlags,
-                                const char* debugName) :
-  ctx_(ctx), device_(device), bufferSize_(bufferSize), vkUsageFlags_(usageFlags), vkMemFlags_(memFlags) {
-  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_CREATE);
-
-  LVK_ASSERT(ctx);
-  LVK_ASSERT(bufferSize > 0);
-
-  const VkBufferCreateInfo ci = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .pNext = nullptr,
-      .flags = 0,
-      .size = bufferSize,
-      .usage = usageFlags,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .queueFamilyIndexCount = 0,
-      .pQueueFamilyIndices = nullptr,
-  };
-
-  if (LVK_VULKAN_USE_VMA) {
-    // Initialize VmaAllocation Info
-    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      vmaAllocInfo_.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-      vmaAllocInfo_.preferredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-      vmaAllocInfo_.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-    }
-
-    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      // Check if coherent buffer is available.
-      VK_ASSERT(vkCreateBuffer(device_, &ci, nullptr, &vkBuffer_));
-      VkMemoryRequirements requirements = {};
-      vkGetBufferMemoryRequirements(device_, vkBuffer_, &requirements);
-      vkDestroyBuffer(device, vkBuffer_, nullptr);
-      vkBuffer_ = VK_NULL_HANDLE;
-
-      if (requirements.memoryTypeBits & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
-        vmaAllocInfo_.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        isCoherentMemory_ = true;
-      }
-    }
-
-    vmaAllocInfo_.usage = VMA_MEMORY_USAGE_AUTO;
-
-    vmaCreateBuffer((VmaAllocator)ctx_->getVmaAllocator(), &ci, &vmaAllocInfo_, &vkBuffer_, &vmaAllocation_, nullptr);
-
-    // handle memory-mapped buffers
-    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      vmaMapMemory((VmaAllocator)ctx_->getVmaAllocator(), vmaAllocation_, &mappedPtr_);
-    }
-  } else {
-    // create buffer
-    VK_ASSERT(vkCreateBuffer(device_, &ci, nullptr, &vkBuffer_));
-
-    // back the buffer with some memory
-    {
-      VkMemoryRequirements requirements = {};
-      vkGetBufferMemoryRequirements(device_, vkBuffer_, &requirements);
-      if (requirements.memoryTypeBits & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
-        isCoherentMemory_ = true;
-      }
-
-      VK_ASSERT(lvk::allocateMemory(ctx_->getVkPhysicalDevice(), device_, &requirements, memFlags, &vkMemory_));
-      VK_ASSERT(vkBindBufferMemory(device_, vkBuffer_, vkMemory_, 0));
-    }
-
-    // handle memory-mapped buffers
-    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      VK_ASSERT(vkMapMemory(device_, vkMemory_, 0, bufferSize_, 0, &mappedPtr_));
-    }
-  }
-
-  LVK_ASSERT(vkBuffer_ != VK_NULL_HANDLE);
-
-  // set debug name
-  VK_ASSERT(lvk::setDebugObjectName(device_, VK_OBJECT_TYPE_BUFFER, (uint64_t)vkBuffer_, debugName));
-
-  // handle shader access
-  if (usageFlags & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
-    const VkBufferDeviceAddressInfo ai = {
-        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-        .buffer = vkBuffer_,
-    };
-    vkDeviceAddress_ = vkGetBufferDeviceAddress(device_, &ai);
-    LVK_ASSERT(vkDeviceAddress_);
-  }
-}
-
-lvk::VulkanBuffer::~VulkanBuffer() {
-  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_DESTROY);
-
-  if (!ctx_) {
-    return;
-  }
-
-  if (LVK_VULKAN_USE_VMA) {
-    if (mappedPtr_) {
-      vmaUnmapMemory((VmaAllocator)ctx_->getVmaAllocator(), vmaAllocation_);
-    }
-    ctx_->deferredTask(std::packaged_task<void()>([vma = ctx_->getVmaAllocator(), buffer = vkBuffer_, allocation = vmaAllocation_]() {
-      vmaDestroyBuffer((VmaAllocator)vma, buffer, allocation);
-    }));
-  } else {
-    if (mappedPtr_) {
-      vkUnmapMemory(device_, vkMemory_);
-    }
-    ctx_->deferredTask(std::packaged_task<void()>([device = device_, buffer = vkBuffer_, memory = vkMemory_]() {
-      vkDestroyBuffer(device, buffer, nullptr);
-      vkFreeMemory(device, memory, nullptr);
-    }));
-  }
-}
-
-lvk::VulkanBuffer::VulkanBuffer(VulkanBuffer&& other) :
-  ctx_(other.ctx_),
-  device_(other.device_),
-  vkBuffer_(other.vkBuffer_),
-  vkMemory_(other.vkMemory_),
-  vmaAllocInfo_(other.vmaAllocInfo_),
-  vmaAllocation_(other.vmaAllocation_),
-  vkDeviceAddress_(other.vkDeviceAddress_),
-  bufferSize_(other.bufferSize_),
-  vkUsageFlags_(other.vkUsageFlags_),
-  vkMemFlags_(other.vkMemFlags_),
-  mappedPtr_(other.mappedPtr_) {
-  other.ctx_ = nullptr;
-}
-
-lvk::VulkanBuffer& lvk::VulkanBuffer::operator=(VulkanBuffer&& other) {
-  std::swap(ctx_, other.ctx_);
-  std::swap(device_, other.device_);
-  std::swap(vkBuffer_, other.vkBuffer_);
-  std::swap(vkMemory_, other.vkMemory_);
-  std::swap(vmaAllocInfo_, other.vmaAllocInfo_);
-  std::swap(vmaAllocation_, other.vmaAllocation_);
-  std::swap(vkDeviceAddress_, other.vkDeviceAddress_);
-  std::swap(bufferSize_, other.bufferSize_);
-  std::swap(vkUsageFlags_, other.vkUsageFlags_);
-  std::swap(vkMemFlags_, other.vkMemFlags_);
-  std::swap(mappedPtr_, other.mappedPtr_);
-  return *this;
-}
-
-void lvk::VulkanBuffer::flushMappedMemory(VkDeviceSize offset, VkDeviceSize size) const {
+void lvk::VulkanBuffer::flushMappedMemory(const VulkanContext& ctx, VkDeviceSize offset, VkDeviceSize size) const {
   if (!LVK_VERIFY(isMapped())) {
     return;
   }
 
   if (LVK_VULKAN_USE_VMA) {
-    vmaFlushAllocation((VmaAllocator)ctx_->getVmaAllocator(), vmaAllocation_, offset, size);
+    vmaFlushAllocation((VmaAllocator)ctx.getVmaAllocator(), vmaAllocation_, offset, size);
   } else {
     const VkMappedMemoryRange range = {
         .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
@@ -847,17 +695,17 @@ void lvk::VulkanBuffer::flushMappedMemory(VkDeviceSize offset, VkDeviceSize size
         .offset = offset,
         .size = size,
     };
-    vkFlushMappedMemoryRanges(device_, 1, &range);
+    vkFlushMappedMemoryRanges(ctx.getVkDevice(), 1, &range);
   }
 }
 
-void lvk::VulkanBuffer::invalidateMappedMemory(VkDeviceSize offset, VkDeviceSize size) const {
+void lvk::VulkanBuffer::invalidateMappedMemory(const VulkanContext& ctx, VkDeviceSize offset, VkDeviceSize size) const {
   if (!LVK_VERIFY(isMapped())) {
     return;
   }
 
   if (LVK_VULKAN_USE_VMA) {
-    vmaInvalidateAllocation(static_cast<VmaAllocator>(ctx_->getVmaAllocator()), vmaAllocation_, offset, size);
+    vmaInvalidateAllocation(static_cast<VmaAllocator>(ctx.getVmaAllocator()), vmaAllocation_, offset, size);
   } else {
     const VkMappedMemoryRange range = {
         .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
@@ -865,11 +713,11 @@ void lvk::VulkanBuffer::invalidateMappedMemory(VkDeviceSize offset, VkDeviceSize
         .offset = offset,
         .size = size,
     };
-    vkInvalidateMappedMemoryRanges(device_, 1, &range);
+    vkInvalidateMappedMemoryRanges(ctx.getVkDevice(), 1, &range);
   }
 }
 
-void lvk::VulkanBuffer::getBufferSubData(size_t offset, size_t size, void* data) {
+void lvk::VulkanBuffer::getBufferSubData(const VulkanContext& ctx, size_t offset, size_t size, void* data) {
   // only host-visible buffers can be downloaded this way
   LVK_ASSERT(mappedPtr_);
 
@@ -880,14 +728,14 @@ void lvk::VulkanBuffer::getBufferSubData(size_t offset, size_t size, void* data)
   LVK_ASSERT(offset + size <= bufferSize_);
 
   if (!isCoherentMemory_) {
-    invalidateMappedMemory(offset, size);
+    invalidateMappedMemory(ctx, offset, size);
   }
 
   const uint8_t* src = static_cast<uint8_t*>(mappedPtr_) + offset;
   memcpy(data, src, size);
 }
 
-void lvk::VulkanBuffer::bufferSubData(size_t offset, size_t size, const void* data) {
+void lvk::VulkanBuffer::bufferSubData(const VulkanContext& ctx, size_t offset, size_t size, const void* data) {
   // only host-visible buffers can be uploaded this way
   LVK_ASSERT(mappedPtr_);
 
@@ -904,145 +752,12 @@ void lvk::VulkanBuffer::bufferSubData(size_t offset, size_t size, const void* da
   }
 
   if (!isCoherentMemory_) {
-    flushMappedMemory(offset, size);
+    flushMappedMemory(ctx, offset, size);
   }
 }
 
-lvk::VulkanImage::VulkanImage(lvk::VulkanContext& ctx,
-                              VkDevice device,
-                              VkImage image,
-                              VkImageUsageFlags usageFlags,
-                              VkFormat imageFormat,
-                              VkExtent3D extent,
-                              const char* debugName) :
-  ctx_(ctx),
-  vkDevice_(device),
-  vkImage_(image),
-  vkUsageFlags_(usageFlags),
-  isSwapchainImage_(true),
-  vkExtent_(extent),
-  vkType_(VK_IMAGE_TYPE_2D),
-  vkImageFormat_(imageFormat),
-  isDepthFormat_(isDepthFormat(imageFormat)),
-  isStencilFormat_(isStencilFormat(imageFormat)) {
-  VK_ASSERT(lvk::setDebugObjectName(vkDevice_, VK_OBJECT_TYPE_IMAGE, (uint64_t)vkImage_, debugName));
-}
-
-lvk::VulkanImage::VulkanImage(lvk::VulkanContext& ctx,
-                              VkDevice device,
-                              VkExtent3D extent,
-                              VkImageType type,
-                              VkFormat format,
-                              uint32_t numLevels,
-                              uint32_t numLayers,
-                              VkImageTiling tiling,
-                              VkImageUsageFlags usageFlags,
-                              VkMemoryPropertyFlags memFlags,
-                              VkImageCreateFlags createFlags,
-                              VkSampleCountFlagBits samples,
-                              const char* debugName) :
-  ctx_(ctx),
-  vkDevice_(device),
-  vkUsageFlags_(usageFlags),
-  vkExtent_(extent),
-  vkType_(type),
-  vkImageFormat_(format),
-  numLevels_(numLevels),
-  numLayers_(numLayers),
-  vkSamples_(samples),
-  isDepthFormat_(isDepthFormat(format)),
-  isStencilFormat_(isStencilFormat(format)) {
-  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_CREATE);
-
-  LVK_ASSERT_MSG(numLevels_ > 0, "The image must contain at least one mip-level");
-  LVK_ASSERT_MSG(numLayers_ > 0, "The image must contain at least one layer");
-  LVK_ASSERT_MSG(vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid VkFormat value");
-  LVK_ASSERT_MSG(vkSamples_ > 0, "The image must contain at least one sample");
-  LVK_ASSERT(extent.width > 0);
-  LVK_ASSERT(extent.height > 0);
-  LVK_ASSERT(extent.depth > 0);
-
-  const VkImageCreateInfo ci = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .pNext = nullptr,
-      .flags = createFlags,
-      .imageType = type,
-      .format = vkImageFormat_,
-      .extent = vkExtent_,
-      .mipLevels = numLevels_,
-      .arrayLayers = numLayers_,
-      .samples = samples,
-      .tiling = tiling,
-      .usage = usageFlags,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .queueFamilyIndexCount = 0,
-      .pQueueFamilyIndices = nullptr,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-  };
-
-  if (LVK_VULKAN_USE_VMA) {
-    vmaAllocInfo_.usage = memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? VMA_MEMORY_USAGE_CPU_TO_GPU : VMA_MEMORY_USAGE_AUTO;
-    VkResult result = vmaCreateImage((VmaAllocator)ctx_.getVmaAllocator(), &ci, &vmaAllocInfo_, &vkImage_, &vmaAllocation_, nullptr);
-
-    if (!LVK_VERIFY(result == VK_SUCCESS)) {
-      LLOGW("failed: error result: %d, memflags: %d,  imageformat: %d\n", result, memFlags, vkImageFormat_);
-    }
-
-    // handle memory-mapped buffers
-    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      vmaMapMemory((VmaAllocator)ctx_.getVmaAllocator(), vmaAllocation_, &mappedPtr_);
-    }
-  } else {
-    // create image
-    VK_ASSERT(vkCreateImage(vkDevice_, &ci, nullptr, &vkImage_));
-
-    // back the image with some memory
-    {
-      VkMemoryRequirements memRequirements;
-      vkGetImageMemoryRequirements(device, vkImage_, &memRequirements);
-
-      VK_ASSERT(lvk::allocateMemory(ctx.getVkPhysicalDevice(), vkDevice_, &memRequirements, memFlags, &vkMemory_));
-      VK_ASSERT(vkBindImageMemory(vkDevice_, vkImage_, vkMemory_, 0));
-    }
-
-    // handle memory-mapped images
-    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-      VK_ASSERT(vkMapMemory(vkDevice_, vkMemory_, 0, VK_WHOLE_SIZE, 0, &mappedPtr_));
-    }
-  }
-
-  VK_ASSERT(lvk::setDebugObjectName(vkDevice_, VK_OBJECT_TYPE_IMAGE, (uint64_t)vkImage_, debugName));
-
-  // Get physical device's properties for the image's format
-  vkGetPhysicalDeviceFormatProperties(ctx.getVkPhysicalDevice(), vkImageFormat_, &vkFormatProperties_);
-}
-
-lvk::VulkanImage::~VulkanImage() {
-  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_DESTROY);
-
-  if (!isSwapchainImage_) {
-    if (LVK_VULKAN_USE_VMA) {
-      if (mappedPtr_) {
-        vmaUnmapMemory((VmaAllocator)ctx_.getVmaAllocator(), vmaAllocation_);
-      }
-      ctx_.deferredTask(std::packaged_task<void()>([vma = ctx_.getVmaAllocator(), image = vkImage_, allocation = vmaAllocation_]() {
-        vmaDestroyImage((VmaAllocator)vma, image, allocation);
-      }));
-    } else {
-      if (mappedPtr_) {
-        vkUnmapMemory(vkDevice_, vkMemory_);
-      }
-      ctx_.deferredTask(std::packaged_task<void()>([device = vkDevice_, image = vkImage_, memory = vkMemory_]() {
-        vkDestroyImage(device, image, nullptr);
-        if (memory != VK_NULL_HANDLE) {
-          vkFreeMemory(device, memory, nullptr);
-        }
-      }));
-    }
-  }
-}
-
-VkImageView lvk::VulkanImage::createImageView(VkImageViewType type,
+VkImageView lvk::VulkanImage::createImageView(VkDevice device,
+                                              VkImageViewType type,
                                               VkFormat format,
                                               VkImageAspectFlags aspectMask,
                                               uint32_t baseLevel,
@@ -1062,8 +777,8 @@ VkImageView lvk::VulkanImage::createImageView(VkImageViewType type,
       .subresourceRange = {aspectMask, baseLevel, numLevels ? numLevels : numLevels_, baseLayer, numLayers},
   };
   VkImageView vkView = VK_NULL_HANDLE;
-  VK_ASSERT(vkCreateImageView(vkDevice_, &ci, nullptr, &vkView));
-  VK_ASSERT(lvk::setDebugObjectName(vkDevice_, VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)vkView, debugName));
+  VK_ASSERT(vkCreateImageView(device, &ci, nullptr, &vkView));
+  VK_ASSERT(lvk::setDebugObjectName(device, VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)vkView, debugName));
 
   return vkView;
 }
@@ -1291,59 +1006,11 @@ bool lvk::VulkanImage::isStencilFormat(VkFormat format) {
          (format == VK_FORMAT_D32_SFLOAT_S8_UINT);
 }
 
-lvk::VulkanTexture::VulkanTexture(std::shared_ptr<VulkanImage> image, VkImageView imageView) :
-  image_(std::move(image)), imageView_(imageView) {
-  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_CREATE);
-
-  LVK_ASSERT(image_.get());
-  LVK_ASSERT(imageView_ != VK_NULL_HANDLE);
-}
-
-lvk::VulkanTexture::~VulkanTexture() {
-  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_DESTROY);
-
-  if (image_) {
-    image_->ctx_.deferredTask(std::packaged_task<void()>(
-        [device = image_->ctx_.getVkDevice(), imageView = imageView_]() { vkDestroyImageView(device, imageView, nullptr); }));
-    for (size_t i = 0; i != LVK_MAX_MIP_LEVELS; i++) {
-      for (size_t j = 0; j != LVK_ARRAY_NUM_ELEMENTS(imageViewForFramebuffer_[0]); j++) {
-        VkImageView v = imageViewForFramebuffer_[i][j];
-        if (v != VK_NULL_HANDLE) {
-          image_->ctx_.deferredTask(std::packaged_task<void()>(
-              [device = image_->ctx_.getVkDevice(), imageView = v]() { vkDestroyImageView(device, imageView, nullptr); }));
-        }
-      }
-    }
-  }
-}
-
-lvk::VulkanTexture::VulkanTexture(VulkanTexture&& other) {
-  std::swap(image_, other.image_);
-  std::swap(imageView_, other.imageView_);
-  for (size_t i = 0; i != LVK_MAX_MIP_LEVELS; i++) {
-    for (size_t j = 0; j != LVK_ARRAY_NUM_ELEMENTS(imageViewForFramebuffer_[0]); j++) {
-      std::swap(imageViewForFramebuffer_[i][j], other.imageViewForFramebuffer_[i][j]);
-    }
-  }
-}
-
-lvk::VulkanTexture& lvk::VulkanTexture::operator=(VulkanTexture&& other) {
-  std::swap(image_, other.image_);
-  std::swap(imageView_, other.imageView_);
-  for (size_t i = 0; i != LVK_MAX_MIP_LEVELS; i++) {
-    for (size_t j = 0; j != LVK_ARRAY_NUM_ELEMENTS(imageViewForFramebuffer_[0]); j++) {
-      std::swap(imageViewForFramebuffer_[i][j], other.imageViewForFramebuffer_[i][j]);
-    }
-  }
-  return *this;
-}
-
-VkImageView lvk::VulkanTexture::getOrCreateVkImageViewForFramebuffer(uint8_t level, uint16_t layer) {
-  LVK_ASSERT(image_ != nullptr);
+VkImageView lvk::VulkanImage::getOrCreateVkImageViewForFramebuffer(VulkanContext& ctx, uint8_t level, uint16_t layer) {
   LVK_ASSERT(level < LVK_MAX_MIP_LEVELS);
   LVK_ASSERT(layer < LVK_ARRAY_NUM_ELEMENTS(imageViewForFramebuffer_[0]));
 
-  if (!image_ || level >= LVK_MAX_MIP_LEVELS) {
+  if (level >= LVK_MAX_MIP_LEVELS || layer >= LVK_ARRAY_NUM_ELEMENTS(imageViewForFramebuffer_[0])) {
     return VK_NULL_HANDLE;
   }
 
@@ -1352,7 +1019,7 @@ VkImageView lvk::VulkanTexture::getOrCreateVkImageViewForFramebuffer(uint8_t lev
   }
 
   imageViewForFramebuffer_[level][layer] =
-      image_->createImageView(VK_IMAGE_VIEW_TYPE_2D, image_->vkImageFormat_, image_->getImageAspectFlags(), level, 1u, layer, 1u);
+      createImageView(ctx.getVkDevice(), VK_IMAGE_VIEW_TYPE_2D, vkImageFormat_, getImageAspectFlags(), level, 1u, layer, 1u);
 
   return imageViewForFramebuffer_[level][layer];
 }
@@ -1413,26 +1080,26 @@ lvk::VulkanSwapchain::VulkanSwapchain(VulkanContext& ctx, uint32_t width, uint32
   const VkImageUsageFlags usageFlags = chooseUsageFlags(ctx.getVkPhysicalDevice(), ctx.vkSurface_, surfaceFormat_.format);
   const bool isCompositeAlphaOpaqueSupported = (ctx.deviceSurfaceCaps_.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) != 0;
   const VkSwapchainCreateInfoKHR ci = {
-      .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-      .surface = ctx.vkSurface_,
-      .minImageCount = chooseSwapImageCount(ctx.deviceSurfaceCaps_),
-      .imageFormat = surfaceFormat_.format,
-      .imageColorSpace = surfaceFormat_.colorSpace,
-      .imageExtent = {.width = width, .height = height},
-      .imageArrayLayers = 1,
-      .imageUsage = usageFlags,
-      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .queueFamilyIndexCount = 1,
-      .pQueueFamilyIndices = &ctx.deviceQueues_.graphicsQueueFamilyIndex,
+    .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+    .surface = ctx.vkSurface_,
+    .minImageCount = chooseSwapImageCount(ctx.deviceSurfaceCaps_),
+    .imageFormat = surfaceFormat_.format,
+    .imageColorSpace = surfaceFormat_.colorSpace,
+    .imageExtent = {.width = width, .height = height},
+    .imageArrayLayers = 1,
+    .imageUsage = usageFlags,
+    .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    .queueFamilyIndexCount = 1,
+    .pQueueFamilyIndices = &ctx.deviceQueues_.graphicsQueueFamilyIndex,
 #if defined(ANDROID)
-      .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+    .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
 #else
-      .preTransform = ctx.deviceSurfaceCaps_.currentTransform,
+    .preTransform = ctx.deviceSurfaceCaps_.currentTransform,
 #endif
-      .compositeAlpha = isCompositeAlphaOpaqueSupported ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
-      .presentMode = chooseSwapPresentMode(ctx.devicePresentModes_),
-      .clipped = VK_TRUE,
-      .oldSwapchain = VK_NULL_HANDLE,
+    .compositeAlpha = isCompositeAlphaOpaqueSupported ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+    .presentMode = chooseSwapPresentMode(ctx.devicePresentModes_),
+    .clipped = VK_TRUE,
+    .oldSwapchain = VK_NULL_HANDLE,
   };
   VK_ASSERT(vkCreateSwapchainKHR(device_, &ci, nullptr, &swapchain_));
 
@@ -1453,22 +1120,37 @@ lvk::VulkanSwapchain::VulkanSwapchain(VulkanContext& ctx, uint32_t width, uint32
   for (uint32_t i = 0; i < numSwapchainImages_; i++) {
     snprintf(debugNameImage, sizeof(debugNameImage) - 1, "Image: swapchain %u", i);
     snprintf(debugNameImageView, sizeof(debugNameImageView) - 1, "Image View: swapchain %u", i);
-    std::shared_ptr<VulkanImage> image = std::make_shared<VulkanImage>(ctx_,
-                                                                       device_,
-                                                                       swapchainImages[i],
-                                                                       usageFlags,
-                                                                       surfaceFormat_.format,
-                                                                       VkExtent3D{.width = width_, .height = height_, .depth = 1},
-                                                                       debugNameImage);
-    VkImageView imageView = image->createImageView(
-        VK_IMAGE_VIEW_TYPE_2D, surfaceFormat_.format, VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1, {}, debugNameImageView);
-    swapchainTextures_[i] = ctx_.texturesPool_.create(VulkanTexture(std::move(image), std::move(imageView)));
+    VulkanImage image = {
+        .vkImage_ = swapchainImages[i],
+        .vkUsageFlags_ = usageFlags,
+        .vkExtent_ = VkExtent3D{.width = width_, .height = height_, .depth = 1},
+        .vkType_ = VK_IMAGE_TYPE_2D,
+        .vkImageFormat_ = surfaceFormat_.format,
+        .isSwapchainImage_ = true,
+        .isDepthFormat_ = VulkanImage::isDepthFormat(surfaceFormat_.format),
+        .isStencilFormat_ = VulkanImage::isStencilFormat(surfaceFormat_.format),
+    };
+
+    VK_ASSERT(lvk::setDebugObjectName(device_, VK_OBJECT_TYPE_IMAGE, (uint64_t)image.vkImage_, debugNameImage));
+
+    image.imageView_ = image.createImageView(device_,
+                                             VK_IMAGE_VIEW_TYPE_2D,
+                                             surfaceFormat_.format,
+                                             VK_IMAGE_ASPECT_COLOR_BIT,
+                                             0,
+                                             VK_REMAINING_MIP_LEVELS,
+                                             0,
+                                             1,
+                                             {},
+                                             debugNameImageView);
+
+    swapchainTextures_[i] = ctx_.texturesPool_.create(std::move(image));
   }
 }
 
 lvk::VulkanSwapchain::~VulkanSwapchain() {
   for (TextureHandle handle : swapchainTextures_) {
-    ctx_.texturesPool_.destroy(handle);
+    ctx_.destroy(handle);
   }
   if (acquireFence_ != VK_NULL_HANDLE) {
     vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
@@ -1480,15 +1162,15 @@ lvk::VulkanSwapchain::~VulkanSwapchain() {
 
 VkImage lvk::VulkanSwapchain::getCurrentVkImage() const {
   if (LVK_VERIFY(currentImageIndex_ < numSwapchainImages_)) {
-    lvk::VulkanTexture* tex = ctx_.texturesPool_.get(swapchainTextures_[currentImageIndex_]);
-    return tex->image_->vkImage_;
+    lvk::VulkanImage* tex = ctx_.texturesPool_.get(swapchainTextures_[currentImageIndex_]);
+    return tex->vkImage_;
   }
   return VK_NULL_HANDLE;
 }
 
 VkImageView lvk::VulkanSwapchain::getCurrentVkImageView() const {
   if (LVK_VERIFY(currentImageIndex_ < numSwapchainImages_)) {
-    lvk::VulkanTexture* tex = ctx_.texturesPool_.get(swapchainTextures_[currentImageIndex_]);
+    lvk::VulkanImage* tex = ctx_.texturesPool_.get(swapchainTextures_[currentImageIndex_]);
     return tex->imageView_;
   }
   return VK_NULL_HANDLE;
@@ -2091,29 +1773,28 @@ lvk::CommandBuffer::~CommandBuffer() {
 void lvk::CommandBuffer::transitionToShaderReadOnly(TextureHandle handle) const {
   LVK_PROFILER_FUNCTION();
 
-  const lvk::VulkanTexture& tex = *ctx_->texturesPool_.get(handle);
-  const lvk::VulkanImage* img = tex.image_.get();
+  const lvk::VulkanImage& img = *ctx_->texturesPool_.get(handle);
 
-  LVK_ASSERT(!img->isSwapchainImage_);
+  LVK_ASSERT(!img.isSwapchainImage_);
 
   // transition only non-multisampled images - MSAA images cannot be accessed from shaders
-  if (img->vkSamples_ == VK_SAMPLE_COUNT_1_BIT) {
-    const VkImageAspectFlags flags = tex.image_->getImageAspectFlags();
+  if (img.vkSamples_ == VK_SAMPLE_COUNT_1_BIT) {
+    const VkImageAspectFlags flags = img.getImageAspectFlags();
     VkPipelineStageFlags srcStage = 0;
-    if (tex.image_->isSampledImage()) {
-      srcStage |= isDepthOrStencilVkFormat(tex.image_->vkImageFormat_) ? VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
-                                                                       : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (img.isSampledImage()) {
+      srcStage |= isDepthOrStencilVkFormat(img.vkImageFormat_) ? VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+                                                               : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     }
-    if (tex.image_->isStorageImage()) {
+    if (img.isStorageImage()) {
       srcStage |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     // set the result of the previous render pass
-    img->transitionLayout(wrapper_->cmdBuf_,
-                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                          srcStage,
-                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // wait for subsequent
-                                                                                                        // fragment/compute shaders
-                          VkImageSubresourceRange{flags, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
+    img.transitionLayout(wrapper_->cmdBuf_,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         srcStage,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, // wait for subsequent
+                                                                                                       // fragment/compute shaders
+                         VkImageSubresourceRange{flags, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
   }
 }
 
@@ -2202,23 +1883,21 @@ void lvk::CommandBuffer::useComputeTexture(TextureHandle handle) {
   LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_BARRIER);
 
   LVK_ASSERT(!handle.empty());
-  lvk::VulkanTexture* tex = ctx_->texturesPool_.get(handle);
-  const lvk::VulkanImage& vkImage = *tex->image_.get();
-  if (!vkImage.isStorageImage()) {
+  lvk::VulkanImage& tex = *ctx_->texturesPool_.get(handle);
+
+  if (!tex.isStorageImage()) {
     LVK_ASSERT_MSG(false, "Did you forget to specify TextureUsageBits::Storage on your texture?");
     return;
   }
 
-  // "frame graph" heuristics: if we are already in VK_IMAGE_LAYOUT_GENERAL, wait for the previous
-  // compute shader
-  const VkPipelineStageFlags srcStage = (vkImage.vkImageLayout_ == VK_IMAGE_LAYOUT_GENERAL) ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
-                                                                                            : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-  vkImage.transitionLayout(
-      wrapper_->cmdBuf_,
-      VK_IMAGE_LAYOUT_GENERAL,
-      srcStage,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      VkImageSubresourceRange{vkImage.getImageAspectFlags(), 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
+  // "frame graph" heuristics: if we are already in VK_IMAGE_LAYOUT_GENERAL, wait for the previous compute shader
+  const VkPipelineStageFlags srcStage = (tex.vkImageLayout_ == VK_IMAGE_LAYOUT_GENERAL) ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                                                                                        : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+  tex.transitionLayout(wrapper_->cmdBuf_,
+                       VK_IMAGE_LAYOUT_GENERAL,
+                       srcStage,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VkImageSubresourceRange{tex.getImageAspectFlags(), 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
 }
 
 void lvk::CommandBuffer::bufferBarrier(BufferHandle handle, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
@@ -2279,29 +1958,28 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
 
   // transition all the color attachments
   for (uint32_t i = 0; i != numFbColorAttachments; i++) {
-    if (const auto& handle = fb.color[i].texture) {
-      lvk::VulkanTexture* colorTex = ctx_->texturesPool_.get(handle);
-      transitionToColorAttachment(wrapper_->cmdBuf_, colorTex, renderPass.color[i]);
+    if (const auto handle = fb.color[i].texture) {
+      lvk::VulkanImage* colorTex = ctx_->texturesPool_.get(handle);
+      transitionToColorAttachment(wrapper_->cmdBuf_, colorTex);
     }
     // handle MSAA
     if (TextureHandle handle = fb.color[i].resolveTexture) {
-      lvk::VulkanTexture* colorResolveTex = ctx_->texturesPool_.get(handle);
-      transitionToColorAttachment(wrapper_->cmdBuf_, colorResolveTex, renderPass.color[i]);
+      lvk::VulkanImage* colorResolveTex = ctx_->texturesPool_.get(handle);
+      transitionToColorAttachment(wrapper_->cmdBuf_, colorResolveTex);
     }
   }
   // transition depth-stencil attachment
   TextureHandle depthTex = fb.depthStencil.texture;
   if (depthTex) {
-    lvk::VulkanTexture& vkDepthTex = *ctx_->texturesPool_.get(depthTex);
-    const lvk::VulkanImage* depthImg = vkDepthTex.image_.get();
-    LVK_ASSERT_MSG(depthImg->vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid depth attachment format");
-    const VkImageAspectFlags flags = vkDepthTex.image_->getImageAspectFlags();
-    depthImg->transitionLayout(wrapper_->cmdBuf_,
-                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, // wait for all subsequent
-                                                                                                               // operations
-                               VkImageSubresourceRange{flags, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
+    const lvk::VulkanImage& depthImg = *ctx_->texturesPool_.get(depthTex);
+    LVK_ASSERT_MSG(depthImg.vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid depth attachment format");
+    const VkImageAspectFlags flags = depthImg.getImageAspectFlags();
+    depthImg.transitionLayout(wrapper_->cmdBuf_,
+                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                              VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, // wait for all subsequent
+                                                                                                              // operations
+                              VkImageSubresourceRange{flags, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
   }
 
   VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2315,12 +1993,12 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
     const lvk::Framebuffer::AttachmentDesc& attachment = fb.color[i];
     LVK_ASSERT(!attachment.texture.empty());
 
-    lvk::VulkanTexture& colorTexture = *ctx_->texturesPool_.get(attachment.texture);
+    lvk::VulkanImage& colorTexture = *ctx_->texturesPool_.get(attachment.texture);
     const auto& descColor = renderPass.color[i];
     if (mipLevel && descColor.level) {
       LVK_ASSERT_MSG(descColor.level == mipLevel, "All color attachments should have the same mip-level");
     }
-    const VkExtent3D dim = colorTexture.getExtent();
+    const VkExtent3D dim = colorTexture.vkExtent_;
     if (fbWidth) {
       LVK_ASSERT_MSG(dim.width == fbWidth, "All attachments should have the save width");
     }
@@ -2330,11 +2008,11 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
     mipLevel = descColor.level;
     fbWidth = dim.width;
     fbHeight = dim.height;
-    samples = colorTexture.image_->vkSamples_;
+    samples = colorTexture.vkSamples_;
     colorAttachments[i] = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .pNext = nullptr,
-        .imageView = colorTexture.getOrCreateVkImageViewForFramebuffer(descColor.level, descColor.layer),
+        .imageView = colorTexture.getOrCreateVkImageViewForFramebuffer(*ctx_, descColor.level, descColor.layer),
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .resolveMode = (samples > 1) ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
         .resolveImageView = VK_NULL_HANDLE,
@@ -2348,8 +2026,9 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
     if (descColor.storeOp == StoreOp_MsaaResolve) {
       LVK_ASSERT(samples > 1);
       LVK_ASSERT_MSG(!attachment.resolveTexture.empty(), "Framebuffer attachment should contain a resolve texture");
-      lvk::VulkanTexture& colorResolveTexture = *ctx_->texturesPool_.get(attachment.resolveTexture);
-      colorAttachments[i].resolveImageView = colorResolveTexture.getOrCreateVkImageViewForFramebuffer(descColor.level, descColor.layer);
+      lvk::VulkanImage& colorResolveTexture = *ctx_->texturesPool_.get(attachment.resolveTexture);
+      colorAttachments[i].resolveImageView =
+          colorResolveTexture.getOrCreateVkImageViewForFramebuffer(*ctx_, descColor.level, descColor.layer);
       colorAttachments[i].resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
   }
@@ -2363,7 +2042,7 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
     depthAttachment = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .pNext = nullptr,
-        .imageView = depthTexture.getOrCreateVkImageViewForFramebuffer(descDepth.level, descDepth.layer),
+        .imageView = depthTexture.getOrCreateVkImageViewForFramebuffer(*ctx_, descDepth.level, descDepth.layer),
         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         .resolveMode = VK_RESOLVE_MODE_NONE,
         .resolveImageView = VK_NULL_HANDLE,
@@ -2372,7 +2051,7 @@ void lvk::CommandBuffer::cmdBeginRendering(const lvk::RenderPass& renderPass, co
         .storeOp = storeOpToVkAttachmentStoreOp(descDepth.storeOp),
         .clearValue = {.depthStencil = {.depth = descDepth.clearDepth, .stencil = descDepth.clearStencil}},
     };
-    const VkExtent3D dim = depthTexture.getExtent();
+    const VkExtent3D dim = depthTexture.vkExtent_;
     if (fbWidth) {
       LVK_ASSERT_MSG(dim.width == fbWidth, "All attachments should have the save width");
     }
@@ -2430,15 +2109,15 @@ void lvk::CommandBuffer::cmdEndRendering() {
   // set image layouts after the render pass
   for (uint32_t i = 0; i != numFbColorAttachments; i++) {
     const auto& attachment = framebuffer_.color[i];
-    const VulkanTexture& tex = *ctx_->texturesPool_.get(attachment.texture);
+    const VulkanImage& tex = *ctx_->texturesPool_.get(attachment.texture);
     // this must match the final layout of the render pass
-    tex.image_->vkImageLayout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    tex.vkImageLayout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   }
 
   if (framebuffer_.depthStencil.texture) {
-    const VulkanTexture& tex = *ctx_->texturesPool_.get(framebuffer_.depthStencil.texture);
+    const VulkanImage& tex = *ctx_->texturesPool_.get(framebuffer_.depthStencil.texture);
     // this must match the final layout of the render pass
-    tex.image_->vkImageLayout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    tex.vkImageLayout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
   }
 
   framebuffer_ = {};
@@ -2675,7 +2354,7 @@ void lvk::VulkanStagingDevice::bufferSubData(VulkanBuffer& buffer, size_t dstOff
   LVK_PROFILER_FUNCTION();
 
   if (buffer.isMapped()) {
-    buffer.bufferSubData(dstOffset, size, data);
+    buffer.bufferSubData(ctx_, dstOffset, size, data);
     return;
   }
 
@@ -2687,7 +2366,7 @@ void lvk::VulkanStagingDevice::bufferSubData(VulkanBuffer& buffer, size_t dstOff
     const uint32_t chunkSize = std::min((uint32_t)size, desc.size_);
 
     // copy data into staging buffer
-    stagingBuffer->bufferSubData(desc.offset_, chunkSize, data);
+    stagingBuffer->bufferSubData(ctx_, desc.offset_, chunkSize, data);
 
     // do the transfer
     const VkBufferCopy copy = {
@@ -2780,7 +2459,7 @@ void lvk::VulkanStagingDevice::imageData2D(VulkanImage& image,
 
   lvk::VulkanBuffer* stagingBuffer = ctx_.buffersPool_.get(stagingBuffer_);
 
-  stagingBuffer->bufferSubData(desc.offset_, storageSize, data);
+  stagingBuffer->bufferSubData(ctx_, desc.offset_, storageSize, data);
 
   uint32_t offset = 0;
 
@@ -2873,7 +2552,7 @@ void lvk::VulkanStagingDevice::imageData3D(VulkanImage& image,
   lvk::VulkanBuffer* stagingBuffer = ctx_.buffersPool_.get(stagingBuffer_);
 
   // 1. Copy the pixel data into the host visible staging buffer
-  stagingBuffer->bufferSubData(desc.offset_, storageSize, data);
+  stagingBuffer->bufferSubData(ctx_, desc.offset_, storageSize, data);
 
   auto& wrapper = immediate_->acquire();
 
@@ -2979,7 +2658,7 @@ void lvk::VulkanStagingDevice::getImageData(VulkanImage& image,
   waitAndReset();
 
   if (!stagingBuffer->isCoherentMemory_) {
-    stagingBuffer->invalidateMappedMemory(desc.offset_, desc.size_);
+    stagingBuffer->invalidateMappedMemory(ctx_, desc.offset_, desc.size_);
   }
 
   // 3. Copy data from staging buffer into data
@@ -3126,7 +2805,8 @@ void lvk::VulkanStagingDevice::waitAndReset() {
   regions_.push_front({0, stagingBufferSize_, SubmitHandle()});
 }
 
-lvk::VulkanContext::VulkanContext(const lvk::ContextConfig& config, void* window, void* display) : config_(config) {
+lvk::VulkanContext::VulkanContext(const lvk::ContextConfig& config, void* window, void* display, VkSurfaceKHR surface) :
+  config_(config), vkSurface_(surface) {
   LVK_PROFILER_THREAD("MainThread");
 
   pimpl_ = std::make_unique<VulkanContextImpl>();
@@ -3144,7 +2824,7 @@ lvk::VulkanContext::VulkanContext(const lvk::ContextConfig& config, void* window
   createInstance();
 #endif
 
-  if (window) {
+  if (window && !surface) {
     createSurface(window, display);
   }
 }
@@ -3156,6 +2836,8 @@ lvk::VulkanContext::~VulkanContext() {
 
   stagingDevice_.reset(nullptr);
   swapchain_.reset(nullptr); // swapchain has to be destroyed prior to Surface
+
+  destroy(dummyTexture_);
 
   if (shaderModulesPool_.numObjects()) {
     LLOGW("Leaked %u shader modules\n", shaderModulesPool_.numObjects());
@@ -3170,9 +2852,8 @@ lvk::VulkanContext::~VulkanContext() {
     // the dummy value is owned by the context
     LLOGW("Leaked %u samplers\n", samplersPool_.numObjects() - 1);
   }
-  if (texturesPool_.numObjects() > 1) {
-    // the dummy value is owned by the context
-    LLOGW("Leaked %u textures\n", texturesPool_.numObjects() - 1);
+  if (texturesPool_.numObjects()) {
+    LLOGW("Leaked %u textures\n", texturesPool_.numObjects());
   }
   if (buffersPool_.numObjects()) {
     LLOGW("Leaked %u buffers\n", buffersPool_.numObjects());
@@ -3231,20 +2912,19 @@ lvk::SubmitHandle lvk::VulkanContext::submit(lvk::ICommandBuffer& commandBuffer,
   LVK_ASSERT(vkCmdBuffer->wrapper_);
 
   if (present) {
-    const lvk::VulkanTexture& tex = *texturesPool_.get(present);
+    const lvk::VulkanImage& tex = *texturesPool_.get(present);
 
-    LVK_ASSERT(tex.image_->isSwapchainImage_);
+    LVK_ASSERT(tex.isSwapchainImage_);
 
     // prepare image for presentation the image might be coming from a compute shader
-    const VkPipelineStageFlagBits srcStage = (tex.image_->vkImageLayout_ == VK_IMAGE_LAYOUT_GENERAL)
+    const VkPipelineStageFlagBits srcStage = (tex.vkImageLayout_ == VK_IMAGE_LAYOUT_GENERAL)
                                                  ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
                                                  : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    tex.image_->transitionLayout(
-        vkCmdBuffer->wrapper_->cmdBuf_,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        srcStage,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, // wait for all subsequent operations
-        VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
+    tex.transitionLayout(vkCmdBuffer->wrapper_->cmdBuf_,
+                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                         srcStage,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, // wait for all subsequent operations
+                         VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS});
   }
 
   const bool shouldPresent = hasSwapchain() && present;
@@ -3371,6 +3051,8 @@ lvk::Holder<lvk::SamplerHandle> lvk::VulkanContext::createSampler(const SamplerS
 lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureDesc& requestedDesc,
                                                                   const char* debugName,
                                                                   Result* outResult) {
+  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_CREATE);
+
   TextureDesc desc(requestedDesc);
 
   if (debugName && *debugName) {
@@ -3379,6 +3061,8 @@ lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureD
 
   const VkFormat vkFormat = lvk::isDepthOrStencilFormat(desc.format) ? getClosestDepthStencilFormat(desc.format)
                                                                      : formatToVkFormat(desc.format);
+
+  LVK_ASSERT_MSG(vkFormat != VK_FORMAT_UNDEFINED, "Invalid VkFormat value");
 
   const lvk::TextureType type = desc.type;
   if (!LVK_VERIFY(type == TextureType_2D || type == TextureType_Cube || type == TextureType_3D)) {
@@ -3449,26 +3133,26 @@ lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureD
     snprintf(debugNameImageView, sizeof(debugNameImageView) - 1, "Image View: %s", desc.debugName);
   }
 
-  VkImageCreateFlags createFlags = 0;
-  uint32_t arrayLayerCount = static_cast<uint32_t>(desc.numLayers);
-  VkImageViewType imageViewType;
-  VkImageType imageType;
-  VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+  VkImageCreateFlags vkCreateFlags = 0;
+  VkImageViewType vkImageViewType;
+  VkImageType vkImageType;
+  VkSampleCountFlagBits vkSamples = VK_SAMPLE_COUNT_1_BIT;
+  uint32_t numLayers = desc.numLayers;
   switch (desc.type) {
   case TextureType_2D:
-    imageViewType = desc.numLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-    imageType = VK_IMAGE_TYPE_2D;
-    samples = lvk::getVulkanSampleCountFlags(desc.numSamples);
+    vkImageViewType = numLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    vkImageType = VK_IMAGE_TYPE_2D;
+    vkSamples = lvk::getVulkanSampleCountFlags(desc.numSamples);
     break;
   case TextureType_3D:
-    imageViewType = VK_IMAGE_VIEW_TYPE_3D;
-    imageType = VK_IMAGE_TYPE_3D;
+    vkImageViewType = VK_IMAGE_VIEW_TYPE_3D;
+    vkImageType = VK_IMAGE_TYPE_3D;
     break;
   case TextureType_Cube:
-    imageViewType = VK_IMAGE_VIEW_TYPE_CUBE;
-    arrayLayerCount *= 6;
-    imageType = VK_IMAGE_TYPE_2D;
-    createFlags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    vkImageViewType = numLayers > 1 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE;
+    vkImageType = VK_IMAGE_TYPE_2D;
+    vkCreateFlags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    numLayers *= 6;
     break;
   default:
     LVK_ASSERT_MSG(false, "Code should NOT be reached");
@@ -3476,33 +3160,96 @@ lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureD
     return {};
   }
 
-  Result result;
-  std::shared_ptr<lvk::VulkanImage> image = createImage(imageType,
-                                                        VkExtent3D{desc.dimensions.width, desc.dimensions.height, desc.dimensions.depth},
-                                                        vkFormat,
-                                                        desc.numMipLevels,
-                                                        arrayLayerCount,
-                                                        VK_IMAGE_TILING_OPTIMAL,
-                                                        usageFlags,
-                                                        memFlags,
-                                                        createFlags,
-                                                        samples,
-                                                        &result,
-                                                        debugNameImage);
-  if (!LVK_VERIFY(result.isOk())) {
-    Result::setResult(outResult, result);
-    return {};
-  }
-  if (!LVK_VERIFY(image.get())) {
-    Result::setResult(outResult, Result::Code::RuntimeError, "Cannot create VulkanImage");
+  const VkExtent3D vkExtent{desc.dimensions.width, desc.dimensions.height, desc.dimensions.depth};
+  const uint32_t numLevels = desc.numMipLevels;
+
+  if (!LVK_VERIFY(validateImageLimits(vkImageType, vkSamples, vkExtent, getVkPhysicalDeviceProperties().limits, outResult))) {
     return {};
   }
 
+  LVK_ASSERT_MSG(numLevels > 0, "The image must contain at least one mip-level");
+  LVK_ASSERT_MSG(numLayers > 0, "The image must contain at least one layer");
+  LVK_ASSERT_MSG(vkSamples > 0, "The image must contain at least one sample");
+  LVK_ASSERT(vkExtent.width > 0);
+  LVK_ASSERT(vkExtent.height > 0);
+  LVK_ASSERT(vkExtent.depth > 0);
+
+  lvk::VulkanImage image = {
+      .vkUsageFlags_ = usageFlags,
+      .vkExtent_ = vkExtent,
+      .vkType_ = vkImageType,
+      .vkImageFormat_ = vkFormat,
+      .vkSamples_ = vkSamples,
+      .numLevels_ = numLevels,
+      .numLayers_ = numLayers,
+      .isDepthFormat_ = VulkanImage::isDepthFormat(vkFormat),
+      .isStencilFormat_ = VulkanImage::isStencilFormat(vkFormat),
+  };
+
+  const VkImageCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .pNext = nullptr,
+      .flags = vkCreateFlags,
+      .imageType = vkImageType,
+      .format = vkFormat,
+      .extent = vkExtent,
+      .mipLevels = numLevels,
+      .arrayLayers = numLayers,
+      .samples = vkSamples,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = usageFlags,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .queueFamilyIndexCount = 0,
+      .pQueueFamilyIndices = nullptr,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+
+  if (LVK_VULKAN_USE_VMA) {
+    VmaAllocationCreateInfo vmaAllocInfo = {
+        .usage = memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? VMA_MEMORY_USAGE_CPU_TO_GPU : VMA_MEMORY_USAGE_AUTO,
+    };
+
+    VkResult result = vmaCreateImage((VmaAllocator)getVmaAllocator(), &ci, &vmaAllocInfo, &image.vkImage_, &image.vmaAllocation_, nullptr);
+
+    if (!LVK_VERIFY(result == VK_SUCCESS)) {
+      LLOGW("Failed: error result: %d, memflags: %d,  imageformat: %d\n", result, memFlags, image.vkImageFormat_);
+      Result::setResult(outResult, Result::Code::RuntimeError, "vmaCreateImage() failed");
+      return {};
+    }
+
+    // handle memory-mapped buffers
+    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+      vmaMapMemory((VmaAllocator)getVmaAllocator(), image.vmaAllocation_, &image.mappedPtr_);
+    }
+  } else {
+    // create image
+    VK_ASSERT(vkCreateImage(vkDevice_, &ci, nullptr, &image.vkImage_));
+
+    // back the image with some memory
+    {
+      VkMemoryRequirements memRequirements = {};
+      vkGetImageMemoryRequirements(vkDevice_, image.vkImage_, &memRequirements);
+
+      VK_ASSERT(lvk::allocateMemory(vkPhysicalDevice_, vkDevice_, &memRequirements, memFlags, &image.vkMemory_));
+      VK_ASSERT(vkBindImageMemory(vkDevice_, image.vkImage_, image.vkMemory_, 0));
+    }
+
+    // handle memory-mapped images
+    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+      VK_ASSERT(vkMapMemory(vkDevice_, image.vkMemory_, 0, VK_WHOLE_SIZE, 0, &image.mappedPtr_));
+    }
+  }
+
+  VK_ASSERT(lvk::setDebugObjectName(vkDevice_, VK_OBJECT_TYPE_IMAGE, (uint64_t)image.vkImage_, debugNameImage));
+
+  // Get physical device's properties for the image's format
+  vkGetPhysicalDeviceFormatProperties(vkPhysicalDevice_, image.vkImageFormat_, &image.vkFormatProperties_);
+
   VkImageAspectFlags aspect = 0;
-  if (image->isDepthFormat_ || image->isStencilFormat_) {
-    if (image->isDepthFormat_) {
+  if (image.isDepthFormat_ || image.isStencilFormat_) {
+    if (image.isDepthFormat_) {
       aspect |= VK_IMAGE_ASPECT_DEPTH_BIT;
-    } else if (image->isStencilFormat_) {
+    } else if (image.isStencilFormat_) {
       aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
     }
   } else {
@@ -3516,15 +3263,15 @@ lvk::Holder<lvk::TextureHandle> lvk::VulkanContext::createTexture(const TextureD
       .a = VkComponentSwizzle(desc.swizzle.a),
   };
 
-  VkImageView view =
-      image->createImageView(imageViewType, vkFormat, aspect, 0, VK_REMAINING_MIP_LEVELS, 0, arrayLayerCount, mapping, debugNameImageView);
+  image.imageView_ = image.createImageView(
+      vkDevice_, vkImageViewType, vkFormat, aspect, 0, VK_REMAINING_MIP_LEVELS, 0, numLayers, mapping, debugNameImageView);
 
-  if (!LVK_VERIFY(view != VK_NULL_HANDLE)) {
+  if (!LVK_VERIFY(image.imageView_ != VK_NULL_HANDLE)) {
     Result::setResult(outResult, Result::Code::RuntimeError, "Cannot create VkImageView");
     return {};
   }
 
-  TextureHandle handle = texturesPool_.create(lvk::VulkanTexture(std::move(image), view));
+  TextureHandle handle = texturesPool_.create(std::move(image));
 
   awaitingCreation_ = true;
 
@@ -3743,8 +3490,8 @@ VkPipeline lvk::VulkanContext::getVkPipeline(ComputePipelineHandle handle) {
   if (cps->lastVkDescriptorSetLayout_ != vkDSL_) {
     deferredTask(
         std::packaged_task<void()>([device = vkDevice_, pipeline = cps->pipeline_]() { vkDestroyPipeline(device, pipeline, nullptr); }));
-    deferredTask(
-        std::packaged_task<void()>([device = vkDevice_, layout = cps->pipelineLayout_]() { vkDestroyPipelineLayout(device, layout, nullptr); }));
+    deferredTask(std::packaged_task<void()>(
+        [device = vkDevice_, layout = cps->pipelineLayout_]() { vkDestroyPipelineLayout(device, layout, nullptr); }));
     cps->pipeline_ = VK_NULL_HANDLE;
     cps->pipelineLayout_ = VK_NULL_HANDLE;
     cps->lastVkDescriptorSetLayout_ = vkDSL_;
@@ -3909,13 +3656,84 @@ void lvk::VulkanContext::destroy(SamplerHandle handle) {
 }
 
 void lvk::VulkanContext::destroy(BufferHandle handle) {
-  // deferred deletion handled in VulkanBuffer
-  buffersPool_.destroy(handle);
+  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_DESTROY);
+
+  SCOPE_EXIT {
+    buffersPool_.destroy(handle);
+  };
+
+  lvk::VulkanBuffer* buf = buffersPool_.get(handle);
+
+  if (!buf) {
+    return;
+  }
+
+  if (LVK_VULKAN_USE_VMA) {
+    if (buf->mappedPtr_) {
+      vmaUnmapMemory((VmaAllocator)getVmaAllocator(), buf->vmaAllocation_);
+    }
+    deferredTask(std::packaged_task<void()>([vma = getVmaAllocator(), buffer = buf->vkBuffer_, allocation = buf->vmaAllocation_]() {
+      vmaDestroyBuffer((VmaAllocator)vma, buffer, allocation);
+    }));
+  } else {
+    if (buf->mappedPtr_) {
+      vkUnmapMemory(vkDevice_, buf->vkMemory_);
+    }
+    deferredTask(std::packaged_task<void()>([device = vkDevice_, buffer = buf->vkBuffer_, memory = buf->vkMemory_]() {
+      vkDestroyBuffer(device, buffer, nullptr);
+      vkFreeMemory(device, memory, nullptr);
+    }));
+  }
 }
 
 void lvk::VulkanContext::destroy(lvk::TextureHandle handle) {
-  // deferred deletion handled in VulkanTexture
-  texturesPool_.destroy(handle);
+  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_DESTROY);
+
+  SCOPE_EXIT {
+    texturesPool_.destroy(handle);
+  };
+
+  lvk::VulkanImage* tex = texturesPool_.get(handle);
+
+  if (!tex) {
+    return;
+  }
+
+  deferredTask(std::packaged_task<void()>(
+      [device = getVkDevice(), imageView = tex->imageView_]() { vkDestroyImageView(device, imageView, nullptr); }));
+
+  for (size_t i = 0; i != LVK_MAX_MIP_LEVELS; i++) {
+    for (size_t j = 0; j != LVK_ARRAY_NUM_ELEMENTS(tex->imageViewForFramebuffer_[0]); j++) {
+      VkImageView v = tex->imageViewForFramebuffer_[i][j];
+      if (v != VK_NULL_HANDLE) {
+        deferredTask(
+            std::packaged_task<void()>([device = getVkDevice(), imageView = v]() { vkDestroyImageView(device, imageView, nullptr); }));
+      }
+    }
+  }
+
+  if (tex->isSwapchainImage_) {
+    return;
+  }
+
+  if (LVK_VULKAN_USE_VMA) {
+    if (tex->mappedPtr_) {
+      vmaUnmapMemory((VmaAllocator)getVmaAllocator(), tex->vmaAllocation_);
+    }
+    deferredTask(std::packaged_task<void()>([vma = getVmaAllocator(), image = tex->vkImage_, allocation = tex->vmaAllocation_]() {
+      vmaDestroyImage((VmaAllocator)vma, image, allocation);
+    }));
+  } else {
+    if (tex->mappedPtr_) {
+      vkUnmapMemory(vkDevice_, tex->vkMemory_);
+    }
+    deferredTask(std::packaged_task<void()>([device = vkDevice_, image = tex->vkImage_, memory = tex->vkMemory_]() {
+      vkDestroyImage(device, image, nullptr);
+      if (memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, memory, nullptr);
+      }
+    }));
+  }
 }
 
 void lvk::VulkanContext::destroy(lvk::QueryPoolHandle handle) {
@@ -3931,8 +3749,8 @@ void lvk::VulkanContext::destroy(Framebuffer& fb) {
     {
       if (handle.empty())
         return;
-      lvk::VulkanTexture* tex = texturesPool_.get(handle);
-      if (!tex || tex->image_->isSwapchainImage_)
+      lvk::VulkanImage* tex = texturesPool_.get(handle);
+      if (!tex || tex->isSwapchainImage_)
         return;
       destroy(handle);
       handle = {};
@@ -3994,35 +3812,39 @@ void lvk::VulkanContext::flushMappedMemory(BufferHandle handle, size_t offset, s
 
   LVK_ASSERT(buf);
 
-  buf->flushMappedMemory(offset, size);
+  buf->flushMappedMemory(*this, offset, size);
 }
 
 lvk::Result lvk::VulkanContext::download(lvk::TextureHandle handle, const TextureRangeDesc& range, void* outData) {
   if (!outData) {
-    return Result();
+    return Result(Result::Code::ArgumentOutOfRange);
   }
 
-  lvk::VulkanTexture* texture = texturesPool_.get(handle);
+  lvk::VulkanImage* texture = texturesPool_.get(handle);
 
   LVK_ASSERT(texture);
 
-  const Result result = validateRange(texture->getExtent(), texture->image_->numLevels_, range);
+  if (!texture) {
+    return Result(Result::Code::RuntimeError);
+  }
+
+  const Result result = validateRange(texture->vkExtent_, texture->numLevels_, range);
 
   if (!LVK_VERIFY(result.isOk())) {
     return result;
   }
 
-  stagingDevice_->getImageData(*texture->image_.get(),
+  stagingDevice_->getImageData(*texture,
                                VkOffset3D{(int32_t)range.x, (int32_t)range.y, (int32_t)range.z},
                                VkExtent3D{range.dimensions.width, range.dimensions.height, range.dimensions.depth},
                                VkImageSubresourceRange{
-                                   .aspectMask = texture->image_->getImageAspectFlags(),
+                                   .aspectMask = texture->getImageAspectFlags(),
                                    .baseMipLevel = range.mipLevel,
                                    .levelCount = range.numMipLevels,
                                    .baseArrayLayer = range.layer,
                                    .layerCount = range.numLayers,
                                },
-                               texture->image_->vkImageFormat_,
+                               texture->vkImageFormat_,
                                outData);
 
   return Result();
@@ -4030,12 +3852,16 @@ lvk::Result lvk::VulkanContext::download(lvk::TextureHandle handle, const Textur
 
 lvk::Result lvk::VulkanContext::upload(lvk::TextureHandle handle, const TextureRangeDesc& range, const void* data) {
   if (!data) {
-    return Result();
+    return Result(Result::Code::ArgumentOutOfRange);
   }
 
-  lvk::VulkanTexture* texture = texturesPool_.get(handle);
+  lvk::VulkanImage* texture = texturesPool_.get(handle);
 
-  const Result result = validateRange(texture->getExtent(), texture->image_->numLevels_, range);
+  if (!texture) {
+    return Result(Result::Code::RuntimeError);
+  }
+
+  const Result result = validateRange(texture->vkExtent_, texture->numLevels_, range);
 
   if (!LVK_VERIFY(result.isOk())) {
     return result;
@@ -4043,11 +3869,10 @@ lvk::Result lvk::VulkanContext::upload(lvk::TextureHandle handle, const TextureR
 
   const uint32_t numLayers = std::max(range.numLayers, 1u);
 
-  const VkImageType type = texture->image_->vkType_;
-  VkFormat vkFormat = texture->image_->vkImageFormat_;
+  VkFormat vkFormat = texture->vkImageFormat_;
 
-  if (type == VK_IMAGE_TYPE_3D) {
-    stagingDevice_->imageData3D(*texture->image_.get(),
+  if (texture->vkType_ == VK_IMAGE_TYPE_3D) {
+    stagingDevice_->imageData3D(*texture,
                                 VkOffset3D{(int32_t)range.x, (int32_t)range.y, (int32_t)range.z},
                                 VkExtent3D{range.dimensions.width, range.dimensions.height, range.dimensions.depth},
                                 vkFormat,
@@ -4057,8 +3882,7 @@ lvk::Result lvk::VulkanContext::upload(lvk::TextureHandle handle, const TextureR
         .offset = {.x = (int)range.x, .y = (int)range.y},
         .extent = {.width = range.dimensions.width, .height = range.dimensions.height},
     };
-    stagingDevice_->imageData2D(
-        *texture->image_.get(), imageRegion, range.mipLevel, range.numMipLevels, range.layer, range.numLayers, vkFormat, data);
+    stagingDevice_->imageData2D(*texture, imageRegion, range.mipLevel, range.numMipLevels, range.layer, range.numLayers, vkFormat, data);
   }
 
   return Result();
@@ -4069,18 +3893,18 @@ lvk::Dimensions lvk::VulkanContext::getDimensions(TextureHandle handle) const {
     return {};
   }
 
-  const lvk::VulkanTexture* tex = texturesPool_.get(handle);
+  const lvk::VulkanImage* tex = texturesPool_.get(handle);
 
   LVK_ASSERT(tex);
 
-  if (!tex || !tex->image_) {
+  if (!tex) {
     return {};
   }
 
   return {
-      .width = tex->image_->vkExtent_.width,
-      .height = tex->image_->vkExtent_.height,
-      .depth = tex->image_->vkExtent_.depth,
+      .width = tex->vkExtent_.width,
+      .height = tex->vkExtent_.height,
+      .depth = tex->vkExtent_.depth,
   };
 }
 
@@ -4089,14 +3913,16 @@ void lvk::VulkanContext::generateMipmap(TextureHandle handle) const {
     return;
   }
 
-  const lvk::VulkanTexture* tex = texturesPool_.get(handle);
+  const lvk::VulkanImage* tex = texturesPool_.get(handle);
 
-  if (tex->image_->numLevels_ > 1) {
-    LVK_ASSERT(tex->image_->vkImageLayout_ != VK_IMAGE_LAYOUT_UNDEFINED);
-    const auto& wrapper = immediate_->acquire();
-    tex->image_->generateMipmap(wrapper.cmdBuf_);
-    immediate_->submit(wrapper);
+  if (tex->numLevels_ <= 1) {
+    return;
   }
+
+  LVK_ASSERT(tex->vkImageLayout_ != VK_IMAGE_LAYOUT_UNDEFINED);
+  const auto& wrapper = immediate_->acquire();
+  tex->generateMipmap(wrapper.cmdBuf_);
+  immediate_->submit(wrapper);
 }
 
 lvk::Format lvk::VulkanContext::getFormat(TextureHandle handle) const {
@@ -4104,13 +3930,13 @@ lvk::Format lvk::VulkanContext::getFormat(TextureHandle handle) const {
     return Format_Invalid;
   }
 
-  return vkFormatToFormat(texturesPool_.get(handle)->image_->vkImageFormat_);
+  return vkFormatToFormat(texturesPool_.get(handle)->vkImageFormat_);
 }
 
 lvk::Holder<lvk::ShaderModuleHandle> lvk::VulkanContext::createShaderModule(const ShaderModuleDesc& desc, Result* outResult) {
   Result result;
   ShaderModuleState sm = desc.dataSize ? createShaderModuleFromSPIRV(desc.data, desc.dataSize, desc.debugName, &result) // binary
-                                    : createShaderModuleFromGLSL(desc.stage, desc.data, desc.debugName, &result); // text
+                                       : createShaderModuleFromGLSL(desc.stage, desc.data, desc.debugName, &result); // text
 
   if (!result.isOk()) {
     Result::setResult(outResult, result);
@@ -4168,9 +3994,9 @@ lvk::ShaderModuleState lvk::VulkanContext::createShaderModuleFromSPIRV(const voi
 }
 
 lvk::ShaderModuleState lvk::VulkanContext::createShaderModuleFromGLSL(ShaderStage stage,
-                                                              const char* source,
-                                                              const char* debugName,
-                                                              Result* outResult) const {
+                                                                      const char* source,
+                                                                      const char* debugName,
+                                                                      Result* outResult) const {
   const VkShaderStageFlagBits vkStage = shaderStageToVkShaderStage(stage);
   LVK_ASSERT(vkStage != VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM);
   LVK_ASSERT(source);
@@ -4195,6 +4021,8 @@ lvk::ShaderModuleState lvk::VulkanContext::createShaderModuleFromGLSL(ShaderStag
       )";
     }
     if (vkStage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+      // Note how nonuniformEXT() should be used:
+      // https://github.com/KhronosGroup/Vulkan-Samples/blob/main/shaders/descriptor_indexing/nonuniform-quads.frag#L33-L39
       sourcePatched += R"(
       #version 460
       #extension GL_EXT_buffer_reference_uvec2 : require
@@ -4209,29 +4037,27 @@ lvk::ShaderModuleState lvk::VulkanContext::createShaderModuleFromGLSL(ShaderStag
       layout (set = 3, binding = 0) uniform texture2D kTextures2DShadow[];
       layout (set = 0, binding = 1) uniform sampler kSamplers[];
       layout (set = 3, binding = 1) uniform samplerShadow kSamplersShadow[];
-      )";
 
-      sourcePatched += R"(
       vec4 textureBindless2D(uint textureid, uint samplerid, vec2 uv) {
-        return texture(sampler2D(kTextures2D[textureid], kSamplers[samplerid]), uv);
+        return texture(nonuniformEXT(sampler2D(kTextures2D[textureid], kSamplers[samplerid])), uv);
       }
       vec4 textureBindless2DLod(uint textureid, uint samplerid, vec2 uv, float lod) {
-        return textureLod(sampler2D(kTextures2D[textureid], kSamplers[samplerid]), uv, lod);
+        return textureLod(nonuniformEXT(sampler2D(kTextures2D[textureid], kSamplers[samplerid])), uv, lod);
       }
       float textureBindless2DShadow(uint textureid, uint samplerid, vec3 uvw) {
-        return texture(sampler2DShadow(kTextures2DShadow[textureid], kSamplersShadow[samplerid]), uvw);
+        return texture(nonuniformEXT(sampler2DShadow(kTextures2DShadow[textureid], kSamplersShadow[samplerid])), uvw);
       }
       ivec2 textureBindlessSize2D(uint textureid) {
-        return textureSize(kTextures2D[textureid], 0);
+        return textureSize(nonuniformEXT(kTextures2D[textureid]), 0);
       }
       vec4 textureBindlessCube(uint textureid, uint samplerid, vec3 uvw) {
-        return texture(samplerCube(kTexturesCube[textureid], kSamplers[samplerid]), uvw);
+        return texture(nonuniformEXT(samplerCube(kTexturesCube[textureid], kSamplers[samplerid])), uvw);
       }
       vec4 textureBindlessCubeLod(uint textureid, uint samplerid, vec3 uvw, float lod) {
-        return textureLod(samplerCube(kTexturesCube[textureid], kSamplers[samplerid]), uvw, lod);
+        return textureLod(nonuniformEXT(samplerCube(kTexturesCube[textureid], kSamplers[samplerid])), uvw, lod);
       }
       int textureBindlessQueryLevels2D(uint textureid) {
-        return textureQueryLevels(kTextures2D[textureid]);
+        return textureQueryLevels(nonuniformEXT(kTextures2D[textureid]));
       }
       )";
     }
@@ -4277,7 +4103,7 @@ lvk::TextureHandle lvk::VulkanContext::getCurrentSwapchainTexture() {
     return {};
   }
 
-  LVK_ASSERT_MSG(texturesPool_.get(tex)->image_->vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid image format");
+  LVK_ASSERT_MSG(texturesPool_.get(tex)->vkImageFormat_ != VK_FORMAT_UNDEFINED, "Invalid image format");
 
   return tex;
 }
@@ -4371,21 +4197,21 @@ void lvk::VulkanContext::createInstance(
   // Shader validation doesn't work in MoltenVK for SPIR-V 1.6 under Vulkan 1.3:
   // "Invalid SPIR-V binary version 1.6 for target environment SPIR-V 1.5 (under Vulkan 1.2 semantics)."
   const VkValidationFeatureDisableEXT validationFeaturesDisabled[] = {
-    VK_VALIDATION_FEATURE_DISABLE_SHADERS_EXT,
-    VK_VALIDATION_FEATURE_DISABLE_SHADER_VALIDATION_CACHE_EXT,
+      VK_VALIDATION_FEATURE_DISABLE_SHADERS_EXT,
+      VK_VALIDATION_FEATURE_DISABLE_SHADER_VALIDATION_CACHE_EXT,
   };
 #endif // __APPLE__
 
   const VkValidationFeaturesEXT features = {
-      .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
-      .pNext = nullptr,
+    .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+    .pNext = nullptr,
 #if !defined(ANDROID)
-      .enabledValidationFeatureCount = config_.enableValidation ? (uint32_t)LVK_ARRAY_NUM_ELEMENTS(validationFeaturesEnabled) : 0u,
-      .pEnabledValidationFeatures = config_.enableValidation ? validationFeaturesEnabled : nullptr,
+    .enabledValidationFeatureCount = config_.enableValidation ? (uint32_t)LVK_ARRAY_NUM_ELEMENTS(validationFeaturesEnabled) : 0u,
+    .pEnabledValidationFeatures = config_.enableValidation ? validationFeaturesEnabled : nullptr,
 #endif
 #if defined(__APPLE__)
-      .disabledValidationFeatureCount = config_.enableValidation ? (uint32_t)LVK_ARRAY_NUM_ELEMENTS(validationFeaturesDisabled) : 0u,
-      .pDisabledValidationFeatures = config_.enableValidation ? validationFeaturesDisabled : nullptr,
+    .disabledValidationFeatureCount = config_.enableValidation ? (uint32_t)LVK_ARRAY_NUM_ELEMENTS(validationFeaturesDisabled) : 0u,
+    .pDisabledValidationFeatures = config_.enableValidation ? validationFeaturesDisabled : nullptr,
 #endif
   };
 
@@ -4393,12 +4219,12 @@ void lvk::VulkanContext::createInstance(
   // https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Configuration_Parameters.md
   const int useMetalArgumentBuffers = 1;
   const VkLayerSettingEXT settings[] = {
-    {"MoltenVK", "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &useMetalArgumentBuffers}};
+      {"MoltenVK", "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &useMetalArgumentBuffers}};
   const VkLayerSettingsCreateInfoEXT layerSettingsCreateInfo = {
-    .sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT,
-    .pNext = config_.enableValidation ? &features : nullptr,
-    .settingCount = (uint32_t)LVK_ARRAY_NUM_ELEMENTS(settings),
-    .pSettings = settings
+      .sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT,
+      .pNext = config_.enableValidation ? &features : nullptr,
+      .settingCount = (uint32_t)LVK_ARRAY_NUM_ELEMENTS(settings),
+      .pSettings = settings,
   };
 #endif // __APPLE__
 
@@ -4417,18 +4243,18 @@ void lvk::VulkanContext::createInstance(
   flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
   const VkInstanceCreateInfo ci = {
-      .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+    .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
 #if defined(__APPLE__)
-      .pNext = &layerSettingsCreateInfo,
+    .pNext = &layerSettingsCreateInfo,
 #else
-      .pNext = config_.enableValidation ? &features : nullptr,
+    .pNext = config_.enableValidation ? &features : nullptr,
 #endif
-      .flags = flags,
-      .pApplicationInfo = &appInfo,
-      .enabledLayerCount = config_.enableValidation ? (uint32_t)LVK_ARRAY_NUM_ELEMENTS(kDefaultValidationLayers) : 0u,
-      .ppEnabledLayerNames = config_.enableValidation ? kDefaultValidationLayers : nullptr,
-      .enabledExtensionCount = numInstanceExtensions,
-      .ppEnabledExtensionNames = instanceExtensionNames,
+    .flags = flags,
+    .pApplicationInfo = &appInfo,
+    .enabledLayerCount = config_.enableValidation ? (uint32_t)LVK_ARRAY_NUM_ELEMENTS(kDefaultValidationLayers) : 0u,
+    .ppEnabledLayerNames = config_.enableValidation ? kDefaultValidationLayers : nullptr,
+    .enabledExtensionCount = numInstanceExtensions,
+    .ppEnabledExtensionNames = instanceExtensionNames,
   };
 
 #ifdef LVK_WITH_OPENXR
@@ -4487,10 +4313,7 @@ void lvk::VulkanContext::createSurface(void* window, void* display) {
   VK_ASSERT(vkCreateWin32SurfaceKHR(vkInstance_, &ci, nullptr, &vkSurface_));
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
   const VkAndroidSurfaceCreateInfoKHR ci = {
-      .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
-      .pNext = nullptr,
-      .flags = 0,
-      .window = (ANativeWindow*)window};
+      .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .pNext = nullptr, .flags = 0, .window = (ANativeWindow*)window};
   VK_ASSERT(vkCreateAndroidSurfaceKHR(vkInstance_, &ci, nullptr, &vkSurface_));
 #elif defined(VK_USE_PLATFORM_XLIB_KHR)
   const VkXlibSurfaceCreateInfoKHR ci = {
@@ -4674,18 +4497,18 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
 
   VkPhysicalDeviceFeatures deviceFeatures10 = {
 #if !defined(__APPLE__)
-      .geometryShader = VK_TRUE,
-      .tessellationShader = VK_TRUE,
+    .geometryShader = VK_TRUE,
+    .tessellationShader = VK_TRUE,
 #endif // !defined(__APPLE__)
-      .multiDrawIndirect = VK_TRUE,
-      .drawIndirectFirstInstance = VK_TRUE,
-      .depthBiasClamp = VK_TRUE,
+    .multiDrawIndirect = VK_TRUE,
+    .drawIndirectFirstInstance = VK_TRUE,
+    .depthBiasClamp = VK_TRUE,
 #if !defined(ANDROID)
-      .fillModeNonSolid = VK_TRUE,
+    .fillModeNonSolid = VK_TRUE,
 #endif
-      .samplerAnisotropy = VK_TRUE,
+    .samplerAnisotropy = VK_TRUE,
 #if !defined(ANDROID)
-      .textureCompressionBC = VK_TRUE,
+    .textureCompressionBC = VK_TRUE,
 #endif
       .fragmentStoresAndAtomics = VK_TRUE,
       .shaderImageGatherExtended = VK_TRUE,
@@ -4696,22 +4519,22 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
       .shaderDrawParameters = VK_TRUE,
   };
   VkPhysicalDeviceVulkan12Features deviceFeatures12 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-      .pNext = &deviceFeatures11,
+    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+    .pNext = &deviceFeatures11,
 #if !defined(__APPLE__)
-      .drawIndirectCount = VK_TRUE,
+    .drawIndirectCount = VK_TRUE,
 #endif // !defined(__APPLE__)
-      .descriptorIndexing = VK_TRUE,
-      .shaderSampledImageArrayNonUniformIndexing = VK_TRUE,
-      .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE,
-      .descriptorBindingStorageImageUpdateAfterBind = VK_TRUE,
-      .descriptorBindingUpdateUnusedWhilePending = VK_TRUE,
-      .descriptorBindingPartiallyBound = VK_TRUE,
-      .descriptorBindingVariableDescriptorCount = VK_TRUE,
-      .runtimeDescriptorArray = VK_TRUE,
-      .uniformBufferStandardLayout = VK_TRUE,
-      .timelineSemaphore = VK_TRUE,
-      .bufferDeviceAddress = VK_TRUE,
+    .descriptorIndexing = VK_TRUE,
+    .shaderSampledImageArrayNonUniformIndexing = VK_TRUE,
+    .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE,
+    .descriptorBindingStorageImageUpdateAfterBind = VK_TRUE,
+    .descriptorBindingUpdateUnusedWhilePending = VK_TRUE,
+    .descriptorBindingPartiallyBound = VK_TRUE,
+    .descriptorBindingVariableDescriptorCount = VK_TRUE,
+    .runtimeDescriptorArray = VK_TRUE,
+    .uniformBufferStandardLayout = VK_TRUE,
+    .timelineSemaphore = VK_TRUE,
+    .bufferDeviceAddress = VK_TRUE,
   };
   VkPhysicalDeviceVulkan13Features deviceFeatures13 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -4722,17 +4545,18 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
       .maintenance4 = VK_TRUE,
   };
 
+
 #ifdef __APPLE__
   VkPhysicalDeviceExtendedDynamicStateFeaturesEXT dynamicStateFeature = {
-    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
-    .pNext = &deviceFeatures13,
-    .extendedDynamicState = VK_TRUE,
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+      .pNext = &deviceFeatures13,
+      .extendedDynamicState = VK_TRUE,
   };
 
   VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2Feature = {
-    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT,
-    .pNext = &dynamicStateFeature,
-    .extendedDynamicState2 = VK_TRUE,
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT,
+      .pNext = &dynamicStateFeature,
+      .extendedDynamicState2 = VK_TRUE,
   };
 
   VkPhysicalDeviceSynchronization2FeaturesKHR synchronization2Feature = {
@@ -4996,45 +4820,21 @@ lvk::Result lvk::VulkanContext::initContext(const HWDeviceDesc& desc
 
   // default texture
   {
-    const VkFormat dummyTextureFormat = VK_FORMAT_R8G8B8A8_UNORM;
-    const VkMemoryPropertyFlags memFlags = useStaging_ ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    const uint32_t pixel = 0xFF000000;
     Result result;
-    std::shared_ptr<lvk::VulkanImage> image =
-        createImage(VK_IMAGE_TYPE_2D,
-                    VkExtent3D{1, 1, 1},
-                    dummyTextureFormat,
-                    1,
-                    1,
-                    VK_IMAGE_TILING_OPTIMAL,
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-                    memFlags,
-                    0,
-                    VK_SAMPLE_COUNT_1_BIT,
-                    &result,
-                    "Image: dummy 1x1");
+    dummyTexture_ = this->createTexture(
+                            {
+                                .format = lvk::Format_RGBA_UN8,
+                                .dimensions = {1, 1, 1},
+                                .usage = TextureUsageBits_Sampled | TextureUsageBits_Storage,
+                                .data = &pixel,
+                            },
+                            "Dummy 1x1 (black)",
+                            &result)
+                        .release();
     if (!LVK_VERIFY(result.isOk())) {
       return result;
     }
-    if (!LVK_VERIFY(image.get())) {
-      return Result(Result::Code::RuntimeError, "Cannot create VulkanImage");
-    }
-    VkImageView imageView = image->createImageView(VK_IMAGE_VIEW_TYPE_2D,
-                                                   dummyTextureFormat,
-                                                   VK_IMAGE_ASPECT_COLOR_BIT,
-                                                   0,
-                                                   VK_REMAINING_MIP_LEVELS,
-                                                   0,
-                                                   1,
-                                                   {},
-                                                   "Image View: dummy 1x1");
-    if (!LVK_VERIFY(imageView != VK_NULL_HANDLE)) {
-      return Result(Result::Code::RuntimeError, "Cannot create VkImageView");
-    }
-    VulkanTexture dummyTexture(std::move(image), imageView);
-    const uint32_t pixel = 0xFF000000;
-    const VkRect2D imageRegion = {.offset = {.x = 0, .y = 0}, .extent = {.width = 1, .height = 1}};
-    stagingDevice_->imageData2D(*dummyTexture.image_.get(), imageRegion, 0, 1, 0, 1, dummyTextureFormat, &pixel);
-    texturesPool_.create(std::move(dummyTexture));
     LVK_ASSERT(texturesPool_.numObjects() == 1);
   }
 
@@ -5177,6 +4977,10 @@ lvk::BufferHandle lvk::VulkanContext::createBuffer(VkDeviceSize bufferSize,
                                                    VkMemoryPropertyFlags memFlags,
                                                    lvk::Result* outResult,
                                                    const char* debugName) {
+  LVK_PROFILER_FUNCTION_COLOR(LVK_PROFILER_COLOR_CREATE);
+
+  LVK_ASSERT(bufferSize > 0);
+
 #define ENSURE_BUFFER_SIZE(flag, maxSize)                                                             \
   if (usageFlags & flag) {                                                                            \
     if (!LVK_VERIFY(bufferSize <= maxSize)) {                                                         \
@@ -5192,27 +4996,95 @@ lvk::BufferHandle lvk::VulkanContext::createBuffer(VkDeviceSize bufferSize,
   ENSURE_BUFFER_SIZE(VK_BUFFER_USAGE_FLAG_BITS_MAX_ENUM, limits.maxStorageBufferRange);
 #undef ENSURE_BUFFER_SIZE
 
-  return buffersPool_.create(VulkanBuffer(this, vkDevice_, bufferSize, usageFlags, memFlags, debugName));
-}
+  VulkanBuffer buf = {
+      .bufferSize_ = bufferSize,
+      .vkUsageFlags_ = usageFlags,
+      .vkMemFlags_ = memFlags,
+  };
 
-std::shared_ptr<lvk::VulkanImage> lvk::VulkanContext::createImage(VkImageType imageType,
-                                                                  VkExtent3D extent,
-                                                                  VkFormat format,
-                                                                  uint32_t numLevels,
-                                                                  uint32_t numLayers,
-                                                                  VkImageTiling tiling,
-                                                                  VkImageUsageFlags usageFlags,
-                                                                  VkMemoryPropertyFlags memFlags,
-                                                                  VkImageCreateFlags flags,
-                                                                  VkSampleCountFlagBits samples,
-                                                                  lvk::Result* outResult,
-                                                                  const char* debugName) {
-  if (!validateImageLimits(imageType, samples, extent, getVkPhysicalDeviceProperties().limits, outResult)) {
-    return nullptr;
+  const VkBufferCreateInfo ci = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .pNext = nullptr,
+      .flags = 0,
+      .size = bufferSize,
+      .usage = usageFlags,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .queueFamilyIndexCount = 0,
+      .pQueueFamilyIndices = nullptr,
+  };
+
+  if (LVK_VULKAN_USE_VMA) {
+    VmaAllocationCreateInfo vmaAllocInfo = {};
+
+    // Initialize VmaAllocation Info
+    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+      vmaAllocInfo = {
+          .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+          .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+          .preferredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+      };
+    }
+
+    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+      // Check if coherent buffer is available.
+      VK_ASSERT(vkCreateBuffer(vkDevice_, &ci, nullptr, &buf.vkBuffer_));
+      VkMemoryRequirements requirements = {};
+      vkGetBufferMemoryRequirements(vkDevice_, buf.vkBuffer_, &requirements);
+      vkDestroyBuffer(vkDevice_, buf.vkBuffer_, nullptr);
+      buf.vkBuffer_ = VK_NULL_HANDLE;
+
+      if (requirements.memoryTypeBits & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
+        vmaAllocInfo.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        buf.isCoherentMemory_ = true;
+      }
+    }
+
+    vmaAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+    vmaCreateBuffer((VmaAllocator)getVmaAllocator(), &ci, &vmaAllocInfo, &buf.vkBuffer_, &buf.vmaAllocation_, nullptr);
+
+    // handle memory-mapped buffers
+    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+      vmaMapMemory((VmaAllocator)getVmaAllocator(), buf.vmaAllocation_, &buf.mappedPtr_);
+    }
+  } else {
+    // create buffer
+    VK_ASSERT(vkCreateBuffer(vkDevice_, &ci, nullptr, &buf.vkBuffer_));
+
+    // back the buffer with some memory
+    {
+      VkMemoryRequirements requirements = {};
+      vkGetBufferMemoryRequirements(vkDevice_, buf.vkBuffer_, &requirements);
+      if (requirements.memoryTypeBits & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
+        buf.isCoherentMemory_ = true;
+      }
+
+      VK_ASSERT(lvk::allocateMemory(vkPhysicalDevice_, vkDevice_, &requirements, memFlags, &buf.vkMemory_));
+      VK_ASSERT(vkBindBufferMemory(vkDevice_, buf.vkBuffer_, buf.vkMemory_, 0));
+    }
+
+    // handle memory-mapped buffers
+    if (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+      VK_ASSERT(vkMapMemory(vkDevice_, buf.vkMemory_, 0, buf.bufferSize_, 0, &buf.mappedPtr_));
+    }
   }
 
-  return std::make_shared<VulkanImage>(
-      *this, vkDevice_, extent, imageType, format, numLevels, numLayers, tiling, usageFlags, memFlags, flags, samples, debugName);
+  LVK_ASSERT(buf.vkBuffer_ != VK_NULL_HANDLE);
+
+  // set debug name
+  VK_ASSERT(lvk::setDebugObjectName(vkDevice_, VK_OBJECT_TYPE_BUFFER, (uint64_t)buf.vkBuffer_, debugName));
+
+  // handle shader access
+  if (usageFlags & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
+    const VkBufferDeviceAddressInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buf.vkBuffer_,
+    };
+    buf.vkDeviceAddress_ = vkGetBufferDeviceAddress(vkDevice_, &ai);
+    LVK_ASSERT(buf.vkDeviceAddress_);
+  }
+
+  return buffersPool_.create(std::move(buf));
 }
 
 void lvk::VulkanContext::bindDefaultDescriptorSets(VkCommandBuffer cmdBuf, VkPipelineBindPoint bindPoint, VkPipelineLayout layout) const {
@@ -5260,12 +5132,12 @@ void lvk::VulkanContext::checkAndUpdateDescriptorSets() {
   VkImageView dummyImageView = texturesPool_.objects_[0].obj_.imageView_;
 
   for (const auto& obj : texturesPool_.objects_) {
-    const VulkanImage* img = obj.obj_.image_.get();
+    const VulkanImage& img = obj.obj_;
     const VkImageView view = obj.obj_.imageView_;
     // multisampled images cannot be directly accessed from shaders
-    const bool isTextureAvailable = img && ((img->vkSamples_ & VK_SAMPLE_COUNT_1_BIT) == VK_SAMPLE_COUNT_1_BIT);
-    const bool isSampledImage = isTextureAvailable && img->isSampledImage();
-    const bool isStorageImage = isTextureAvailable && img->isStorageImage();
+    const bool isTextureAvailable = (img.vkSamples_ & VK_SAMPLE_COUNT_1_BIT) == VK_SAMPLE_COUNT_1_BIT;
+    const bool isSampledImage = isTextureAvailable && img.isSampledImage();
+    const bool isStorageImage = isTextureAvailable && img.isStorageImage();
     infoSampledImages.push_back({VK_NULL_HANDLE, isSampledImage ? view : dummyImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
     LVK_ASSERT(infoSampledImages.back().imageView != VK_NULL_HANDLE);
     infoStorageImages.push_back({VK_NULL_HANDLE, isStorageImage ? view : dummyImageView, VK_IMAGE_LAYOUT_GENERAL});

@@ -27,7 +27,6 @@ macro(ADD_DEMO app)
     target_link_libraries(${app} PRIVATE bc7enc)
     target_link_libraries(${app} PRIVATE meshoptimizer)
     target_link_libraries(${app} PRIVATE tinyobjloader)
-    target_link_libraries(${app} PRIVATE glfw)
     if(UNIX AND NOT APPLE)
       target_link_libraries(${app} PRIVATE EGL)
     endif()
@@ -57,7 +56,16 @@ macro(ADD_DEMO app)
            DESTINATION "${CMAKE_BINARY_DIR}/android/${app}/gradle/wrapper")
 
       set(APP_NAME ${app})
-      set(ANDROID_ABI_FILTERS ${LVK_ANDROID_ABI})
+
+      set(ABI_STRING "")
+      foreach(str ${LVK_ANDROID_ABI})
+        if(NOT ${ABI_STRING} STRLESS "")
+          set(ABI_STRING "${ABI_STRING}, ")
+        endif()
+        set(ABI_STRING "${ABI_STRING}'${str}'")
+      endforeach()
+      set(ANDROID_ABI_FILTERS ${ABI_STRING})
+
       configure_file("${LVK_ROOT_DIR}/android/settings.gradle.in"
                      "${CMAKE_BINARY_DIR}/android/${app}/settings.gradle")
       configure_file("${LVK_ROOT_DIR}/android/app/build.gradle.in"
@@ -70,7 +78,7 @@ macro(ADD_DEMO app)
       if(LVK_WITH_ANDROID_VALIDATION)
         list(APPEND abdroid_abi arm64-v8a armeabi-v7a x86 x86_64)
         foreach(abi ${abdroid_abi})
-          string(FIND ${LVK_ANDROID_ABI} "${abi}" abi_substr_index)
+          string(FIND ${ABI_STRING} "${abi}" abi_substr_index)
           if(abi_substr_index GREATER -1)
             file(COPY "${LVK_ROOT_DIR}/third-party/deps/src/android-validation-layers/${abi}/libVkLayer_khronos_validation.so"
                  DESTINATION "${CMAKE_BINARY_DIR}/android/${app}/app/src/main/jniLibs/${abi}")
@@ -113,7 +121,9 @@ macro(ADD_DEMO_LINK_LIBRARIES app libs)
   endif()
 endmacro()
 
-ADD_DEMO("HelloTriangle")
+ADD_DEMO("001_HelloTriangle")
+ADD_DEMO("002_RenderToCubeMap")
+ADD_DEMO("003_RenderToCubeMapSinglePass")
 
 ADD_DEMO("Tiny")
 

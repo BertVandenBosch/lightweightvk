@@ -24,7 +24,7 @@ option(LVK_WITH_ANDROID_VALIDATION "Enable validation layers on Android"     ON)
 
 cmake_dependent_option(LVK_WITH_VULKAN_PORTABILITY "Enable portability extension" ON "APPLE" OFF)
 
-set(LVK_ANDROID_ABI "\'arm64-v8a\'" CACHE STRING "Enabled ABI on Android")
+set(LVK_ANDROID_ABI "arm64-v8a" CACHE STRING "Enabled ABI on Android")
 set(LVK_CUSTOM_MOLTENVK_PATH "" CACHE STRING "Path to custom MoltenVK")
 # cmake-format: on
 
@@ -213,9 +213,11 @@ if(LVK_WITH_GLFW)
   set(GLFW_INSTALL        OFF CACHE BOOL "")
   set(GLFW_VULKAN_STATIC  OFF CACHE BOOL "")
   if(WAYLAND_FOUND)
-    set(GLFW_USE_WAYLAND ON)
+    set(GLFW_BUILD_WAYLAND  ON)
+    set(GLFW_BUILD_X11     OFF)
   else()
-    set(GLFW_USE_WAYLAND OFF)
+    set(GLFW_BUILD_WAYLAND OFF)
+    set(GLFW_BUILD_X11      ON)
   endif()
   add_subdirectory(third-party/deps/src/glfw)
   lvk_set_folder(glfw            "third-party/GLFW3")

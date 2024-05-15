@@ -31,7 +31,7 @@ struct XRParams {
 };
 #endif
 
-struct DeviceQueues {
+struct DeviceQueues final {
   const static uint32_t INVALID = 0xFFFFFFFF;
   uint32_t graphicsQueueFamilyIndex = INVALID;
   uint32_t computeQueueFamilyIndex = INVALID;
@@ -40,40 +40,20 @@ struct DeviceQueues {
   VkQueue computeQueue = VK_NULL_HANDLE;
 };
 
-class VulkanBuffer final {
- public:
-  VulkanBuffer() = default;
-  VulkanBuffer(lvk::VulkanContext* ctx,
-               VkDevice device,
-               VkDeviceSize bufferSize,
-               VkBufferUsageFlags usageFlags,
-               VkMemoryPropertyFlags memFlags,
-               const char* debugName = nullptr);
-  ~VulkanBuffer();
+struct VulkanBuffer final {
+  // clang-format off
+  [[nodiscard]] inline uint8_t* getMappedPtr() const { return static_cast<uint8_t*>(mappedPtr_); }
+  [[nodiscard]] inline bool isMapped() const { return mappedPtr_ != nullptr;  }
+  // clang-format on
 
-  VulkanBuffer(const VulkanBuffer&) = delete;
-  VulkanBuffer& operator=(const VulkanBuffer&) = delete;
-
-  VulkanBuffer(VulkanBuffer&& other);
-  VulkanBuffer& operator=(VulkanBuffer&& other);
-
-  void bufferSubData(size_t offset, size_t size, const void* data);
-  void getBufferSubData(size_t offset, size_t size, void* data);
-  [[nodiscard]] uint8_t* getMappedPtr() const {
-    return static_cast<uint8_t*>(mappedPtr_);
-  }
-  bool isMapped() const {
-    return mappedPtr_ != nullptr;
-  }
-  void flushMappedMemory(VkDeviceSize offset, VkDeviceSize size) const;
-  void invalidateMappedMemory(VkDeviceSize offset, VkDeviceSize size) const;
+  void bufferSubData(const VulkanContext& ctx, size_t offset, size_t size, const void* data);
+  void getBufferSubData(const VulkanContext& ctx, size_t offset, size_t size, void* data);
+  void flushMappedMemory(const VulkanContext& ctx, VkDeviceSize offset, VkDeviceSize size) const;
+  void invalidateMappedMemory(const VulkanContext& ctx, VkDeviceSize offset, VkDeviceSize size) const;
 
  public:
-  lvk::VulkanContext* ctx_ = nullptr;
-  VkDevice device_ = VK_NULL_HANDLE;
   VkBuffer vkBuffer_ = VK_NULL_HANDLE;
   VkDeviceMemory vkMemory_ = VK_NULL_HANDLE;
-  VmaAllocationCreateInfo vmaAllocInfo_ = {};
   VmaAllocation vmaAllocation_ = VK_NULL_HANDLE;
   VkDeviceAddress vkDeviceAddress_ = 0;
   VkDeviceSize bufferSize_ = 0;
@@ -83,75 +63,49 @@ class VulkanBuffer final {
   bool isCoherentMemory_ = false;
 };
 
-class VulkanImage final {
- public:
-  VulkanImage(lvk::VulkanContext& ctx,
-              VkDevice device,
-              VkExtent3D extent,
-              VkImageType type,
-              VkFormat format,
-              uint32_t numLevels,
-              uint32_t numLayers,
-              VkImageTiling tiling,
-              VkImageUsageFlags usageFlags,
-              VkMemoryPropertyFlags memFlags,
-              VkImageCreateFlags createFlags,
-              VkSampleCountFlagBits samples,
-              const char* debugName);
-  VulkanImage(lvk::VulkanContext& ctx,
-              VkDevice device,
-              VkImage image,
-              VkImageUsageFlags usageFlags,
-              VkFormat imageFormat,
-              VkExtent3D extent,
-              const char* debugName);
-  ~VulkanImage();
-
-  VulkanImage(const VulkanImage&) = delete;
-  VulkanImage& operator=(const VulkanImage&) = delete;
-
+struct VulkanImage final {
   // clang-format off
-  bool isSampledImage() const { return (vkUsageFlags_ & VK_IMAGE_USAGE_SAMPLED_BIT) > 0; }
-  bool isStorageImage() const { return (vkUsageFlags_ & VK_IMAGE_USAGE_STORAGE_BIT) > 0; }
+  [[nodiscard]] inline bool isSampledImage() const { return (vkUsageFlags_ & VK_IMAGE_USAGE_SAMPLED_BIT) > 0; }
+  [[nodiscard]] inline bool isStorageImage() const { return (vkUsageFlags_ & VK_IMAGE_USAGE_STORAGE_BIT) > 0; }
   // clang-format on
 
   /*
    * Setting `numLevels` to a non-zero value will override `mipLevels_` value from the original Vulkan image, and can be used to create
    * image views with different number of levels.
    */
-  VkImageView createImageView(VkImageViewType type,
-                              VkFormat format,
-                              VkImageAspectFlags aspectMask,
-                              uint32_t baseLevel,
-                              uint32_t numLevels = VK_REMAINING_MIP_LEVELS,
-                              uint32_t baseLayer = 0,
-                              uint32_t numLayers = 1,
-                              const VkComponentMapping mapping = {.r = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                                  .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                                  .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-                                                                  .a = VK_COMPONENT_SWIZZLE_IDENTITY},
-                              const char* debugName = nullptr) const;
+  [[nodiscard]] VkImageView createImageView(VkDevice device,
+                                            VkImageViewType type,
+                                            VkFormat format,
+                                            VkImageAspectFlags aspectMask,
+                                            uint32_t baseLevel,
+                                            uint32_t numLevels = VK_REMAINING_MIP_LEVELS,
+                                            uint32_t baseLayer = 0,
+                                            uint32_t numLayers = 1,
+                                            const VkComponentMapping mapping = {.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                                                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                                                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                                                                                .a = VK_COMPONENT_SWIZZLE_IDENTITY},
+                                            const char* debugName = nullptr) const;
 
   void generateMipmap(VkCommandBuffer commandBuffer) const;
-
   void transitionLayout(VkCommandBuffer commandBuffer,
                         VkImageLayout newImageLayout,
                         VkPipelineStageFlags srcStageMask,
                         VkPipelineStageFlags dstStageMask,
                         const VkImageSubresourceRange& subresourceRange) const;
 
-  VkImageAspectFlags getImageAspectFlags() const;
+  [[nodiscard]] VkImageAspectFlags getImageAspectFlags() const;
 
-  static bool isDepthFormat(VkFormat format);
-  static bool isStencilFormat(VkFormat format);
+  // framebuffers can render only into one level/layer
+  [[nodiscard]] VkImageView getOrCreateVkImageViewForFramebuffer(VulkanContext& ctx, uint8_t level, uint16_t layer);
+
+  [[nodiscard]] static bool isDepthFormat(VkFormat format);
+  [[nodiscard]] static bool isStencilFormat(VkFormat format);
 
  public:
-  lvk::VulkanContext& ctx_;
-  VkDevice vkDevice_ = VK_NULL_HANDLE;
   VkImage vkImage_ = VK_NULL_HANDLE;
   VkImageUsageFlags vkUsageFlags_ = 0;
   VkDeviceMemory vkMemory_ = VK_NULL_HANDLE;
-  VmaAllocationCreateInfo vmaAllocInfo_ = {};
   VmaAllocation vmaAllocation_ = VK_NULL_HANDLE;
   VkFormatProperties vkFormatProperties_ = {};
   VkExtent3D vkExtent_ = {0, 0, 0};
@@ -166,31 +120,9 @@ class VulkanImage final {
   bool isStencilFormat_ = false;
   // current image layout
   mutable VkImageLayout vkImageLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
-};
-
-struct VulkanTexture final {
-  VulkanTexture() = default;
-  VulkanTexture(std::shared_ptr<lvk::VulkanImage> image, VkImageView imageView);
-  ~VulkanTexture();
-
-  VulkanTexture(const VulkanTexture&) = delete;
-  VulkanTexture& operator=(const VulkanTexture&) = delete;
-
-  VulkanTexture(VulkanTexture&& other);
-  VulkanTexture& operator=(VulkanTexture&& other);
-
-  VkExtent3D getExtent() const {
-    LVK_ASSERT(image_.get());
-    return image_->vkExtent_;
-  }
-
-  // framebuffers can render only into one level/layer
-  VkImageView getOrCreateVkImageViewForFramebuffer(uint8_t level, uint16_t layer);
-
-  std::shared_ptr<lvk::VulkanImage> image_;
-  VkImageView imageView_ = VK_NULL_HANDLE; // all mip-levels
-  VkImageView imageViewForFramebuffer_[LVK_MAX_MIP_LEVELS][16] = {}; // This number is chosen to fit my personal needs (HBAOplus
-                                                                     // deinterleave texture2DArray target)
+  // precached image views - owned by this VulkanImage
+  VkImageView imageView_ = VK_NULL_HANDLE; // default view with all mip-levels
+  VkImageView imageViewForFramebuffer_[LVK_MAX_MIP_LEVELS][6] = {}; // max 6 faces for cubemap rendering
 };
 
 class VulkanSwapchain final {
@@ -497,7 +429,7 @@ class VulkanStagingDevice final {
 
 class VulkanContext final : public IContext {
  public:
-  VulkanContext(const lvk::ContextConfig& config, void* window, void* display = nullptr);
+  VulkanContext(const lvk::ContextConfig& config, void* window, void* display = nullptr, VkSurfaceKHR surface = VK_NULL_HANDLE);
   ~VulkanContext();
 
 #ifdef LVK_WITH_OPENXR
@@ -566,18 +498,6 @@ class VulkanContext final : public IContext {
   );
   lvk::Result initSwapchain(uint32_t width, uint32_t height);
 
-  std::shared_ptr<VulkanImage> createImage(VkImageType imageType,
-                                           VkExtent3D extent,
-                                           VkFormat format,
-                                           uint32_t numLevels,
-                                           uint32_t numLayers,
-                                           VkImageTiling tiling,
-                                           VkImageUsageFlags usageFlags,
-                                           VkMemoryPropertyFlags memFlags,
-                                           VkImageCreateFlags flags,
-                                           VkSampleCountFlagBits samples,
-                                           lvk::Result* outResult,
-                                           const char* debugName = nullptr);
   BufferHandle createBuffer(VkDeviceSize bufferSize,
                             VkBufferUsageFlags usageFlags,
                             VkMemoryPropertyFlags memFlags,
@@ -686,12 +606,14 @@ class VulkanContext final : public IContext {
 
   lvk::ContextConfig config_;
 
+  TextureHandle dummyTexture_;
+
   lvk::Pool<lvk::ShaderModule, lvk::ShaderModuleState> shaderModulesPool_;
   lvk::Pool<lvk::RenderPipeline, lvk::RenderPipelineState> renderPipelinesPool_;
   lvk::Pool<lvk::ComputePipeline, lvk::ComputePipelineState> computePipelinesPool_;
   lvk::Pool<lvk::Sampler, VkSampler> samplersPool_;
   lvk::Pool<lvk::Buffer, lvk::VulkanBuffer> buffersPool_;
-  lvk::Pool<lvk::Texture, lvk::VulkanTexture> texturesPool_;
+  lvk::Pool<lvk::Texture, lvk::VulkanImage> texturesPool_;
   lvk::Pool<lvk::QueryPool, VkQueryPool> queriesPool_;
 };
 
